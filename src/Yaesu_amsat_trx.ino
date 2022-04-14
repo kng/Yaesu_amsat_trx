@@ -35,6 +35,7 @@
 #define YELLOW          0xFFE0  
 #define WHITE           0xFFFF
 
+#include <TimeLib.h>
 #include <Adafruit_GFX.h>
 #include <Adafruit_SSD1351.h>
 #include <Adafruit_BusIO_Register.h>
@@ -43,13 +44,12 @@
 #include <SPI.h>
 #include <Sgp4.h>
 
-//const int8_t DISABLE_CHIP_SELECT = -1;
-//#define SPI_SPEED SD_SCK_MHZ(4)
 Adafruit_SSD1351 tft = Adafruit_SSD1351(SCREEN_WIDTH, SCREEN_HEIGHT, &SPI, CS_PIN, DC_PIN, RST_PIN);
-SdFat sd;
-HardwareSerial& r1 = Serial1;  // Radio 1, RX 0, TX 1
-HardwareSerial& r2 = Serial2;  // Radio 2, RX 9, TX 10
-HardwareSerial& gpsport = Serial3;  // GPS receiver: RX 7, TX 8
+SdFs sd;
+FsFile file;
+HardwareSerial& r1 = Serial1;  // Radio 1: T4.0 RX 0, TX 1 / T3.2 RX 0, TX 1
+HardwareSerial& r2 = Serial2;  // Radio 2: T4.0 RX 7, TX 8 / T3.2 RX 9, TX 10
+HardwareSerial& gpsport = Serial3;  // GPS: T4.0 RX 15, TX 14 / T3.2 RX 7, TX 8
 Adafruit_GPS GPS(&gpsport);
 Sgp4 sat;
 
@@ -167,28 +167,26 @@ void setup() {
   r2.begin(9600);
 
   poll_time = millis();
-  while (!Serial) {                   // remove for release!
-    SysCall::yield();
-    if(millis() - poll_time >= 2000)  // wait 2s for serial monitor to be ready
-      break;
-  }
+  while (!Serial && millis() < 2000);
 
   GPS.begin(9600);        // make sure your module settings matches this, common 4800 or 9600
 
   tft.begin();
   tft.setRotation(2);     // rotate display 180 deg if necessary
   
-  if (!sd.begin(SDCS_PIN)) {
-    Serial.println("failed!");
-    //return;
+  if (!sd.begin(SdSpiConfig(SDCS_PIN, SHARED_SPI, 20))) {
+    sd.initErrorHalt(&Serial);
   }
-  Serial.print("SD card size: ");
-  Serial.println(sd.card()->cardSize());
-  
+  sd.ls(LS_DATE | LS_SIZE);
+  //Serial.println(F("Done"));
+  if (!file.open("favorites.txt", FILE_READ)) {
+    Serial.println(F("file.open failed"));
+  }
+  file.close();
+
   updateDisplay();        // draw display
 
-  Serial.println("Yaesu amsat trx with dual FT-817/818/857");
-  Serial.println("By: Daniel SA2KNG");
+  Serial.println("Yaesu amsat trx with dual FT-817/818/857. By: Daniel SA2KNG");
   poll_interval = intervals[0];
   poll_time = millis();
 
@@ -220,6 +218,7 @@ void loop() {   // non blocking loop, no delays or blocking calls
     jdt += (double) 10 / 86400;   // calculate speed over positions separated by 10s
     sat.findsat(jdt);
     sat_speed = (dist_old - sat.satDist) / 10;
+
 
     Serial.print("Sat Az: ");
     Serial.print(sat.satAz);
