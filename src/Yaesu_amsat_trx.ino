@@ -1,5 +1,5 @@
 /* 
- * Teensy 3.2
+ * Teensy 3.2 / 4.0
  * Arduino 1.8.13 or PlatformIO
  * Author: SA2KNG
  * Display: SSD1351 oled 128x128 or 128x96
@@ -25,6 +25,8 @@
 #define RST_PIN  3
 #define DC_PIN   4
 #define SDCS_PIN 5
+
+#define NUM_SAT_CONF    16    // max number of satellites read from config
 
 #define BLACK           0x0000
 #define BLUE            0x001F
@@ -71,6 +73,18 @@ byte gps_oldsecond, disp_mode, disp_oldmode = 255;
 long downlink, uplink; // deciherz, same as frequency resolution
 unsigned long norad;  // norad ID
 
+typedef enum { MODE_UNK, MODE_FM, MODE_USB, MODE_LSB } radio_mode;
+
+typedef struct { // display name, norad, uplink_qrg, uplink_mode, downlink_qrg, downlink_mode
+  char name[16];
+  unsigned long norad;
+  unsigned long uplink_qrg;
+  unsigned long downlink_qrg;
+  radio_mode uplink_mode; // 0 unknown, 1 fm, 2 usb, 3 lsb
+  radio_mode downlink_mode;
+} satellite_conf;
+satellite_conf satellites[NUM_SAT_CONF];
+
 unsigned long from_bcd_be(char* c){
     unsigned long result(0);
     byte l=4;
@@ -101,6 +115,12 @@ char *to_bcd_be(char bcd_data[], unsigned long freq, unsigned char bcd_len){
     return bcd_data;
 }
 
+radio_mode str2mode(char *str, size_t sze){
+  if(strncmp_P(str, "fm", sze)==0) return MODE_FM;
+  if(strncmp_P(str, "usb", sze)==0) return MODE_USB;
+  if(strncmp_P(str, "lsb", sze)==0) return MODE_LSB;
+  return MODE_UNK;
+}
 
 void updateDisplay(){
   if(disp_oldmode != disp_mode){
@@ -173,48 +193,89 @@ time_t getTeensy3Time()
 }
 
 void readConf(){
+  char *ptr, *token, row[128];
   bool confLoaded = false;
+  const char *delim = ",";
+  satellite_conf tmp;
   if(sd.fatType() > 0){
     if (file.open("satellites.txt", FILE_READ)) {
-      // TODO: read out the configuration
       // display name, norad, uplink_qrg, uplink_mode, downlink_qrg, downlink_mode
+      byte snum = 0;
       while(file.available()){
-        Serial.println(file.readStringUntil('\n'));
+        file.readBytesUntil('\n', row, sizeof(row));
+        if(row[0]=='#') continue;    // skip comments
+        token = strtok(row, delim);
+        if(token==NULL) continue;
+        strncpy(tmp.name, token, sizeof(tmp.name));
+        token=strtok(NULL, delim);
+        if(token==NULL) continue;
+        tmp.norad = strtol(token, &ptr, 10);
+        if(tmp.norad < 1) continue;
+        token=strtok(NULL, delim);
+        if(token==NULL) continue;
+        tmp.uplink_qrg=strtol(token, &ptr, 10);
+        if(tmp.uplink_qrg < 1) continue;
+        token=strtok(NULL, delim);
+        if(token==NULL) continue;
+        tmp.uplink_mode=str2mode(token, sizeof(token));
+        token=strtok(NULL, delim);
+        if(token==NULL) continue;
+        tmp.downlink_qrg=strtol(token, &ptr, 10);
+        if(tmp.downlink_qrg < 1) continue;
+        token=strtok(NULL, delim);
+        if(token==NULL) continue;
+        tmp.downlink_mode=str2mode(token, sizeof(token));
+        memcpy(&satellites[snum], &tmp, sizeof(tmp));
+        snum++;
+        if(snum >= NUM_SAT_CONF) break;
       }
       file.close();
+      confLoaded = true;
     }else{
       Serial.println(F("cannot find satellites.txt"));
     }
+  }else{
+    Serial.println(F("uknown filesystem on SD"));
   }
-  if(!confLoaded){ // failed to load, use hardcoded
+  if(!confLoaded){
+    Serial.println(F("Failed to load configuration, defaults used."));
     norad = 39444;
     downlink = 14596000;
     uplink = 43514000;
+  }else{
+    norad = satellites[0].norad;
+    downlink = satellites[0].downlink_qrg/10;
+    uplink = satellites[0].uplink_qrg/10;
   }
 }
 
 void readTLE(int noradID){
-  char satname[128], tle_line1[128], tle_line2[128];
+  char row1[128], row2[128], row3[128], nsearch[10];
   bool tleloaded = false;
+  sprintf(nsearch, "2 %05d ", noradID);   // search for the last row
   if(sd.fatType() > 0){
-    if (file.open("nasabare.txt", FILE_READ)) {  // for now, read out first TLE
-      file.readBytesUntil('\n', satname, sizeof(satname));
-      file.readBytesUntil('\n', tle_line1, sizeof(tle_line1));
-      file.readBytesUntil('\n', tle_line2, sizeof(tle_line2));
+    if (file.open("nasabare.txt", FILE_READ)) {
+      while(file.available()){
+        strncpy(row1, row2, sizeof(row1));
+        strncpy(row2, row3, sizeof(row2));
+        file.readBytesUntil('\n', row3, sizeof(row3));
+        if(strncmp(row3, nsearch, 8)==0){
+          tleloaded = true;
+          break;
+        }
+      }
       file.close();
-      tleloaded=true;
     }else{
       Serial.println(F("cannot find nasabare.txt"));
     }
-//  }else{
-//    Serial.println(F("uknown filesystem on SD"));
   }
   if(!tleloaded){ // failed to load, use hardcoded
-    strncpy_P(satname, PSTR("AO-73 (hardcoded)"), sizeof(satname)); // TLE date 2022-04-13
-    strncpy_P(tle_line1, PSTR("1 39444U 13066AE  22097.48225341  .00003217  00000-0  39123-3 0  9993"), sizeof(tle_line1));
-    strncpy_P(tle_line2, PSTR("2 39444  97.6190  74.6247 0055298 265.9560  93.5332 14.83068053451003"), sizeof(tle_line2));
+    Serial.println(F("Failed to find satellite, using hardcoded."));
+    strncpy_P(row1, PSTR("AO-73 (hardcoded)"), sizeof(row1)); // TLE date 2022-04-13
+    strncpy_P(row2, PSTR("1 39444U 13066AE  22097.48225341  .00003217  00000-0  39123-3 0  9993"), sizeof(row2));
+    strncpy_P(row3, PSTR("2 39444  97.6190  74.6247 0055298 265.9560  93.5332 14.83068053451003"), sizeof(row3));
   }
-  sat.init(satname, tle_line1, tle_line2);     //initialize satellite parameters
+  sat.init(row1, row2, row3);     //initialize satellite parameters
   //Serial.printf(PSTR("satname: %s\ntle1: %s\ntle2: %s\n"), satname, tle_line1, tle_line2);
   Serial.printf(PSTR("Sat init: %s\n"), sat.satName);
 }
@@ -240,8 +301,8 @@ void setup() {
   if (!sd.begin(SdSpiConfig(SDCS_PIN, SHARED_SPI, 20))) {
     sd.initErrorHalt(&Serial);
   }
-  //sd.ls(LS_DATE | LS_SIZE);
-  readConf();
+  //sd.ls(LS_DATE | LS_SIZE); // show files on card
+  readConf();             // read config
   readTLE(norad);         // search and load TLE from file
 
   poll_interval = intervals[0];
@@ -267,7 +328,7 @@ void loop() {   // non blocking loop, no delays or blocking calls
     sat_speed = (dist_old - sat.satDist) / 10;
 
     Serial.printf(PSTR("Sat %s: Az %.0lf, El %.0lf, Speed %.2lf km/s\n"), sat.satName, sat.satAz, sat.satEl, sat_speed);
-    if(disp_mode==1) updateDisplay();
+    if(disp_mode==1 || disp_mode==2) updateDisplay();
   }
 
   if(Serial.available()){     // USB serial as manager, taking single byte commands for simplicity
@@ -319,25 +380,19 @@ void loop() {   // non blocking loop, no delays or blocking calls
       poll_time = millis();
       r1_lock = 0;    // independent
       r2_lock = 0;
-    }else if(c=='d'){ // doppler controlled, release with 'u'
+    }else if(c=='d'){ // doppler soft controlled, for linears
       poll_time = 0;
       r1_lock = 3;
       r2_lock = 3;
+    }else if(c=='D'){ // doppler forced, for fm
+      poll_time = 0;
+      r1_lock = 4;
+      r2_lock = 4;
 
     }else if(c=='g'){ // show gps
       Serial.printf(PSTR("Time: %2d:%2d:%2d\n"), GPS.hour, GPS.minute, GPS.seconds);
       Serial.printf(PSTR("Latitude: %.3f, Longitude: %.3f\n"), GPS.latitudeDegrees, GPS.longitudeDegrees);
     }
-  }
-
-  // auto polling of radios
-  if(poll_time != 0 && millis() - poll_time >= poll_interval && r1_lock != 3 && r2_lock != 3){
-    poll_time = r1_time = r2_time = millis();
-    //Serial.println("polling radios");
-    r1.write(read_freq, sizeof(read_freq));             // TODO: reduce poll interval when timed out, hard to turn on/off radio otherwise
-    r1_req=5;
-    r2.write(read_freq, sizeof(read_freq));
-    r2_req=5;
   }
 
   // parse responses from radio 1
@@ -413,6 +468,14 @@ void loop() {   // non blocking loop, no delays or blocking calls
       //to_bcd_be(write_freq, r2_freq, 8);
       //r2.write(write_freq, sizeof(write_freq));
     }
+  }else if(r1_lock == 4){ // doppler forced
+    if(millis() - poll_time >= poll_interval){
+      //poll_time = millis(); // handled below
+      r1_freq = downlink + sat_speed / 29979 * downlink / 10;
+      to_bcd_be(write_freq, r1_freq, 8);
+      r1.write(write_freq, sizeof(write_freq));
+      //Serial.println(r1_freq);
+    }
   }else{
     r1_lock = 0;
   }
@@ -440,9 +503,26 @@ void loop() {   // non blocking loop, no delays or blocking calls
     }
   }else if(r2_lock == 3){
     // handled in r1 above
+  }else if(r2_lock == 4){ // doppler forced
+    if(millis() - poll_time >= poll_interval){
+      poll_time = millis();
+      r2_freq = uplink - sat_speed / 29979 * uplink / 10;
+      to_bcd_be(write_freq, r2_freq, 8);
+      r2.write(write_freq, sizeof(write_freq));
+      //Serial.println(r2_freq);
+    }
   }else{
     r2_lock = 0;
   }
 
+  // auto polling of radios
+  if(poll_time != 0 && millis() - poll_time >= poll_interval){
+    poll_time = r1_time = r2_time = millis();
+    //Serial.println("polling radios");
+    r1.write(read_freq, sizeof(read_freq));             // TODO: reduce poll interval when timed out, hard to turn on/off radio otherwise
+    r1_req=5;
+    r2.write(read_freq, sizeof(read_freq));
+    r2_req=5;
+  }
 }
 
