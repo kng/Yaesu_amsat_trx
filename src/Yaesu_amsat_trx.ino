@@ -68,8 +68,8 @@ unsigned int poll_interval, timeout = 50;  // in ms
 float vfo_factor;   // factor between the vfo's at locking
 double jdt, dist_old, sat_speed; // julian date, old sat distance
 byte gps_oldsecond, disp_mode, disp_oldmode = 255;
-long downlink = 14596000, uplink = 43514000; // deciherz, same as frequency resolution
-
+long downlink, uplink; // deciherz, same as frequency resolution
+unsigned long norad;  // norad ID
 
 unsigned long from_bcd_be(char* c){
     unsigned long result(0);
@@ -156,49 +156,96 @@ void updateDisplay(){
     tft.print(" ");
     tft.println((double) sat_speed / 29979 * downlink, 0);
 
+  }else if(disp_mode==2){
+    tft.setCursor(0,0);
+    tft.setTextSize(1);
+    tft.print("System time: ");
+    tft.print(second());
+
   }else{
     disp_mode=0;
   }
 }
 
+time_t getTeensy3Time()
+{
+  return Teensy3Clock.get();
+}
+
+void readConf(){
+  bool confLoaded = false;
+  if(sd.fatType() > 0){
+    if (file.open("satellites.txt", FILE_READ)) {
+      // TODO: read out the configuration
+      // display name, norad, uplink_qrg, uplink_mode, downlink_qrg, downlink_mode
+      while(file.available()){
+        Serial.println(file.readStringUntil('\n'));
+      }
+      file.close();
+    }else{
+      Serial.println(F("cannot find satellites.txt"));
+    }
+  }
+  if(!confLoaded){ // failed to load, use hardcoded
+    norad = 39444;
+    downlink = 14596000;
+    uplink = 43514000;
+  }
+}
+
+void readTLE(int noradID){
+  char satname[128], tle_line1[128], tle_line2[128];
+  bool tleloaded = false;
+  if(sd.fatType() > 0){
+    if (file.open("nasabare.txt", FILE_READ)) {  // for now, read out first TLE
+      file.readBytesUntil('\n', satname, sizeof(satname));
+      file.readBytesUntil('\n', tle_line1, sizeof(tle_line1));
+      file.readBytesUntil('\n', tle_line2, sizeof(tle_line2));
+      file.close();
+      tleloaded=true;
+    }else{
+      Serial.println(F("cannot find nasabare.txt"));
+    }
+//  }else{
+//    Serial.println(F("uknown filesystem on SD"));
+  }
+  if(!tleloaded){ // failed to load, use hardcoded
+    strncpy_P(satname, PSTR("AO-73 (hardcoded)"), sizeof(satname)); // TLE date 2022-04-13
+    strncpy_P(tle_line1, PSTR("1 39444U 13066AE  22097.48225341  .00003217  00000-0  39123-3 0  9993"), sizeof(tle_line1));
+    strncpy_P(tle_line2, PSTR("2 39444  97.6190  74.6247 0055298 265.9560  93.5332 14.83068053451003"), sizeof(tle_line2));
+  }
+  sat.init(satname, tle_line1, tle_line2);     //initialize satellite parameters
+  //Serial.printf(PSTR("satname: %s\ntle1: %s\ntle2: %s\n"), satname, tle_line1, tle_line2);
+  Serial.printf(PSTR("Sat init: %s\n"), sat.satName);
+}
+
 void setup() {
   Serial.begin(115200);   // USB Serial monitor
-  r1.begin(9600);
-  r2.begin(9600);
+  r1.begin(9600);         // Radio 1
+  r2.begin(9600);         // Radio 2
+  setSyncProvider(getTeensy3Time);
+  while (!Serial && millis() < 2000);   // wait 2s for serial monitor
 
-  poll_time = millis();
-  while (!Serial && millis() < 2000);
+  Serial.println(F("Yaesu amsat trx with dual FT-817/818/857. By: Daniel SA2KNG."));
+  if (timeStatus()!= timeSet) {
+    Serial.println(F("Unable to sync with the RTC"));
+  }
 
   GPS.begin(9600);        // make sure your module settings matches this, common 4800 or 9600
 
   tft.begin();
   tft.setRotation(2);     // rotate display 180 deg if necessary
+  updateDisplay();        // draw display
   
   if (!sd.begin(SdSpiConfig(SDCS_PIN, SHARED_SPI, 20))) {
     sd.initErrorHalt(&Serial);
   }
-  sd.ls(LS_DATE | LS_SIZE);
-  //Serial.println(F("Done"));
-  if (!file.open("favorites.txt", FILE_READ)) {
-    Serial.println(F("file.open failed"));
-  }
-  file.close();
+  //sd.ls(LS_DATE | LS_SIZE);
+  readConf();
+  readTLE(norad);         // search and load TLE from file
 
-  updateDisplay();        // draw display
-
-  Serial.println("Yaesu amsat trx with dual FT-817/818/857. By: Daniel SA2KNG");
   poll_interval = intervals[0];
   poll_time = millis();
-
-  char satname[] = "AO-73";   // TLE date 2022-04-13
-  char tle_line1[] = "1 39444U 13066AE  22097.48225341  .00003217  00000-0  39123-3 0  9993";
-  char tle_line2[] = "2 39444  97.6190  74.6247 0055298 265.9560  93.5332 14.83068053451003";
-  //char satname[] = "AO-07";
-  //char tle_line1[] = "1 07530U 74089B   22097.87728311 -.00000028  00000-0  11420-3 0  9992";
-  //char tle_line2[] = "2 07530 101.8995  77.5396 0012201 175.5837 252.4210 12.53653929168869";
-  sat.init(satname,tle_line1,tle_line2);     //initialize satellite parameters
-  Serial.print("Sat init: ");
-  Serial.println(satname);
 }
 
 void loop() {   // non blocking loop, no delays or blocking calls
@@ -209,7 +256,7 @@ void loop() {   // non blocking loop, no delays or blocking calls
   if (GPS.newNMEAreceived()) {  // parse nmea
     GPS.parse(GPS.lastNMEA());
   }
-  if(GPS.fix && GPS.seconds != gps_oldsecond){
+  if(GPS.fix && GPS.seconds != gps_oldsecond){    // TODO: fallback to internal RTC (battery backed)
     gps_oldsecond = GPS.seconds;
     sat.site(GPS.latitudeDegrees, GPS.longitudeDegrees, GPS.altitude);
     jday((int)2000 + GPS.year, GPS.month, GPS.day, GPS.hour, GPS.minute, GPS.seconds, 0, false, jdt);
@@ -219,15 +266,7 @@ void loop() {   // non blocking loop, no delays or blocking calls
     sat.findsat(jdt);
     sat_speed = (dist_old - sat.satDist) / 10;
 
-
-    Serial.print("Sat Az: ");
-    Serial.print(sat.satAz);
-    Serial.print(", El: ");
-    Serial.print(sat.satEl);
-    Serial.print(", Dist: ");
-    Serial.print(sat.satDist, 4);
-    Serial.print(", Speed: ");
-    Serial.println(sat_speed);
+    Serial.printf(PSTR("Sat %s: Az %.0lf, El %.0lf, Speed %.2lf km/s\n"), sat.satName, sat.satAz, sat.satEl, sat_speed);
     if(disp_mode==1) updateDisplay();
   }
 
@@ -248,6 +287,8 @@ void loop() {   // non blocking loop, no delays or blocking calls
       disp_mode=0;
     }else if(c=='4'){   // show satellite
       disp_mode=1;
+    }else if(c=='5'){   // show time
+      disp_mode=2;
 
     }else if(c=='r'){
       Serial.println("read_rxs 1");
@@ -284,17 +325,8 @@ void loop() {   // non blocking loop, no delays or blocking calls
       r2_lock = 3;
 
     }else if(c=='g'){ // show gps
-      Serial.print("Time: ");
-      if (GPS.hour < 10) Serial.print('0');
-      Serial.print(GPS.hour, DEC); Serial.print(':');
-      if (GPS.minute < 10) Serial.print('0');
-      Serial.print(GPS.minute, DEC); Serial.print(':');
-      if (GPS.seconds < 10) Serial.print('0');
-      Serial.println(GPS.seconds, DEC);
-      Serial.print("Latitude: ");
-      Serial.print(GPS.latitudeDegrees);
-      Serial.print(", Longitude: ");
-      Serial.println(GPS.longitudeDegrees);
+      Serial.printf(PSTR("Time: %2d:%2d:%2d\n"), GPS.hour, GPS.minute, GPS.seconds);
+      Serial.printf(PSTR("Latitude: %.3f, Longitude: %.3f\n"), GPS.latitudeDegrees, GPS.longitudeDegrees);
     }
   }
 
