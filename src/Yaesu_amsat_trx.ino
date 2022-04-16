@@ -70,7 +70,7 @@ unsigned int poll_interval, timeout = 50;  // in ms
 float vfo_factor;   // factor between the vfo's at locking
 double jdt, dist_old, sat_speed; // julian date, old sat distance
 byte gps_oldsecond, disp_mode, disp_oldmode = 255;
-long downlink, uplink; // deciherz, same as frequency resolution
+long downlink, uplink, downlink_doppler, uplink_doppler; // deciherz, same as frequency resolution
 unsigned long norad;  // norad ID
 
 typedef enum { MODE_UNK, MODE_FM, MODE_USB, MODE_LSB } radio_mode;
@@ -84,6 +84,7 @@ typedef struct { // display name, norad, uplink_qrg, uplink_mode, downlink_qrg, 
   radio_mode downlink_mode;
 } satellite_conf;
 satellite_conf satellites[NUM_SAT_CONF];
+byte sat_ptr = 0, sat_num = 0;
 
 unsigned long from_bcd_be(char* c){
     unsigned long result(0);
@@ -131,56 +132,34 @@ void updateDisplay(){
   if(disp_mode==0){
     tft.setCursor(0,0);
     tft.setTextSize(1);
-    tft.print("Radio 1: RX");
+    tft.print(F("Radio 1: RX"));
     tft.setCursor(0,SCREEN_HEIGHT/2);
-    tft.print("Radio 2: TX");
+    tft.print(F("Radio 2: TX"));
     tft.setCursor(0,16);
     tft.setTextSize(2);
-    char qrg[12];
-    sprintf(qrg, "%03li.%03li.%02li", r1_freq/100000, r1_freq/100 % 1000, r1_freq % 100);
-    if(r1_freq == 1) tft.print("Timeout.  ");
-    else tft.print(qrg);
+    if(r1_freq == 1) tft.print(F("Timeout.  "));
+    else tft.printf("%03li.%03li.%02li", r1_freq/100000, r1_freq/100 % 1000, r1_freq % 100);
     tft.setCursor(0,SCREEN_HEIGHT/2 + 16);
     tft.setTextSize(2);
-    sprintf(qrg, "%03li.%03li.%02li", r2_freq/100000, r2_freq/100 % 1000, r2_freq % 100);
-    if(r2_freq == 1) tft.print("Timeout.  ");
-    else tft.print(qrg);
+    if(r2_freq == 1) tft.print(F("Timeout.  "));
+    else tft.printf("%03li.%03li.%02li", r2_freq/100000, r2_freq/100 % 1000, r2_freq % 100);
 
   }else if(disp_mode==1){
     tft.setCursor(0,0);
     tft.setTextSize(1);
-    tft.print("Satellite: ");
-    tft.print(sat.satName);
-
-    tft.setCursor(0, 16);
-    tft.print("Az:");
-    tft.setCursor(40, 16);
-    tft.print("El:");
-    tft.setCursor(80, 16);
-    tft.print("km/s:");
-
-    tft.setCursor(0,32);
-    tft.print(sat.satAz, 0);
-    tft.setCursor(40,32);
-    tft.print(sat.satEl, 1);
-    tft.setCursor(80,32);
-    tft.print(sat_speed, 2);
-
-    tft.setCursor(0,48);
-    tft.print("UL: ");
-    tft.print(uplink);
-    tft.print("  ");
-    tft.println((double) sat_speed / 29979 * uplink, 0);
-    tft.print("DL: ");
-    tft.print(downlink);
-    tft.print(" ");
-    tft.println((double) sat_speed / 29979 * downlink, 0);
+    tft.printf(PSTR("Sat: %s\n"), sat.satName);
+    tft.printf(PSTR("Az: %.1lf\nEl: %.1lf\nSpeed: %.2lf km/s\n\n"), sat.satAz, sat.satEl, sat_speed);
+    //tft.setCursor(0,40);
+    tft.printf(PSTR("UL: %9li %5.0lf\n"), uplink*10, (double)-sat_speed / 29979 * uplink);
+    tft.printf(PSTR("UD: %9li\n\n"), uplink_doppler*10);
+    tft.printf(PSTR("DL: %9li %5.0lf\n"), downlink*10, (double)sat_speed / 29979 * downlink);
+    tft.printf(PSTR("DD: %9li\n"), downlink_doppler*10);
 
   }else if(disp_mode==2){
     tft.setCursor(0,0);
     tft.setTextSize(1);
-    tft.print("System time: ");
-    tft.print(second());
+    tft.printf(PSTR("System time: %02d:%02d:%02d"), hour(), minute(), second());
+    tft.printf(PSTR("GPS time:    %02d:%02d:%02d"), GPS.hour, GPS.minute, GPS.seconds);
 
   }else{
     disp_mode=0;
@@ -200,7 +179,6 @@ void readConf(){
   if(sd.fatType() > 0){
     if (file.open("satellites.txt", FILE_READ)) {
       // display name, norad, uplink_qrg, uplink_mode, downlink_qrg, downlink_mode
-      byte snum = 0;
       while(file.available()){
         file.readBytesUntil('\n', row, sizeof(row));
         if(row[0]=='#') continue;    // skip comments
@@ -225,9 +203,9 @@ void readConf(){
         token=strtok(NULL, delim);
         if(token==NULL) continue;
         tmp.downlink_mode=str2mode(token, sizeof(token));
-        memcpy(&satellites[snum], &tmp, sizeof(tmp));
-        snum++;
-        if(snum >= NUM_SAT_CONF) break;
+        memcpy(&satellites[sat_num], &tmp, sizeof(tmp));
+        if(sat_num + 1 >= NUM_SAT_CONF) break;
+        sat_num++;
       }
       file.close();
       confLoaded = true;
@@ -243,9 +221,38 @@ void readConf(){
     downlink = 14596000;
     uplink = 43514000;
   }else{
-    norad = satellites[0].norad;
-    downlink = satellites[0].downlink_qrg/10;
-    uplink = satellites[0].uplink_qrg/10;
+    //norad = satellites[sat_ptr].norad;
+    //downlink = satellites[sat_ptr].downlink_qrg/10;
+    //uplink = satellites[sat_ptr].uplink_qrg/10;
+    loadSat();
+    Serial.printf(PSTR("Satellites loaded: %d\n"), sat_num);
+  }
+}
+
+void loadSat(void){
+  //Serial.printf(PSTR("Satellite selected: %d\n"), sat_ptr);
+  norad = satellites[sat_ptr].norad;
+  downlink = satellites[sat_ptr].downlink_qrg/10;
+  uplink = satellites[sat_ptr].uplink_qrg/10;
+  readTLE(norad);
+  findPass();
+}
+
+void findPass(void){
+  passinfo overpass;
+  int  year; int mon; int day; int hr; int minute; double sec;
+  jday((int)2000 + GPS.year, GPS.month, GPS.day, GPS.hour, GPS.minute, GPS.seconds, 0, false, jdt);
+  sat.initpredpoint(jdt, 0.0);
+  if(sat.nextpass(&overpass,20)==1){
+    invjday(overpass.jdstart ,0 ,true , year, mon, day, hr, minute, sec);
+    Serial.printf(PSTR("Overpass %4d-%02d-%02d\n"), year, mon, day);
+    Serial.printf(PSTR("  Start: az=%lf at %02d:%02d:%02lf\n"), overpass.azstart, hr, minute, sec);
+    invjday(overpass.jdmax ,0 ,true , year, mon, day, hr, minute, sec);
+    Serial.printf(PSTR("  Max: elev=%lf at %02d:%02d:%02lf\n"), overpass.maxelevation, hr, minute, sec);
+    invjday(overpass.jdstop ,0 ,true , year, mon, day, hr, minute, sec);
+    Serial.printf(PSTR("  Stop: az=%lf at %02d:%02d:%02lf\n"), overpass.azstop, hr, minute, sec);
+  }else{
+    Serial.print(F("Could not find satellite pass.\n"));
   }
 }
 
@@ -326,6 +333,8 @@ void loop() {   // non blocking loop, no delays or blocking calls
     jdt += (double) 10 / 86400;   // calculate speed over positions separated by 10s
     sat.findsat(jdt);
     sat_speed = (dist_old - sat.satDist) / 10;
+    uplink_doppler = uplink - sat_speed / 29979 * uplink / 10;  // deciherz
+    downlink_doppler = downlink + sat_speed / 29979 * downlink / 10;
 
     Serial.printf(PSTR("Sat %s: Az %.0lf, El %.0lf, Speed %.2lf km/s\n"), sat.satName, sat.satAz, sat.satEl, sat_speed);
     if(disp_mode==1 || disp_mode==2) updateDisplay();
@@ -388,6 +397,15 @@ void loop() {   // non blocking loop, no delays or blocking calls
       poll_time = 0;
       r1_lock = 4;
       r2_lock = 4;
+
+    }else if(c=='n'){ // next satellite from conf
+      sat_ptr++;
+      if(sat_ptr >= sat_num) sat_ptr = 0;
+      loadSat();
+    }else if(c=='N'){ // previour satellite
+      if(sat_ptr == 0) sat_ptr = sat_num;
+      else sat_ptr--;
+      loadSat();
 
     }else if(c=='g'){ // show gps
       Serial.printf(PSTR("Time: %2d:%2d:%2d\n"), GPS.hour, GPS.minute, GPS.seconds);
