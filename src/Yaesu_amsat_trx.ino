@@ -68,8 +68,9 @@ unsigned long r1_time, r2_time, poll_time, sat_time;   // millis on last command
 const int intervals[2] = {1000,100};    // slow/fast polling interval
 unsigned int poll_interval, timeout = 50;  // in ms
 float vfo_factor;   // factor between the vfo's at locking
-double jdt, dist_old, sat_speed; // julian date, old sat distance
+double gps_jdt, rtc_jdt, dist_old, sat_speed; // julian date, old sat distance
 byte gps_oldsecond, disp_mode, disp_oldmode = 255;
+int oldsecond;
 long downlink, uplink, downlink_doppler, uplink_doppler; // deciherz, same as frequency resolution
 unsigned long norad;  // norad ID
 
@@ -171,6 +172,16 @@ time_t getTeensy3Time()
   return Teensy3Clock.get();
 }
 
+void processSyncMessage() {
+  Serial.setTimeout(100);   // allow 100ms for time message
+  time_t t = Serial.parseInt();
+  if (t != 0) {
+    Teensy3Clock.set(t);
+    setTime(t);
+    Serial.println(F("Time set via sync message."));
+  }
+}
+
 void readConf(){
   char *ptr, *token, row[128];
   bool confLoaded = false;
@@ -224,7 +235,7 @@ void readConf(){
     //norad = satellites[sat_ptr].norad;
     //downlink = satellites[sat_ptr].downlink_qrg/10;
     //uplink = satellites[sat_ptr].uplink_qrg/10;
-    loadSat();
+    loadSat();  // proper time/pos probably not set yet...
     Serial.printf(PSTR("Satellites loaded: %d\n"), sat_num);
   }
 }
@@ -240,17 +251,17 @@ void loadSat(void){
 
 void findPass(void){
   passinfo overpass;
-  int  year; int mon; int day; int hr; int minute; double sec;
-  jday((int)2000 + GPS.year, GPS.month, GPS.day, GPS.hour, GPS.minute, GPS.seconds, 0, false, jdt);
-  sat.initpredpoint(jdt, 0.0);
+  int yr, mon, dy, hr, mn; double sec;
+  jday(year(), month(), day(), hour(), minute(), second(), 0, false, rtc_jdt);
+  sat.initpredpoint(rtc_jdt, 0.0);
   if(sat.nextpass(&overpass,20)==1){
-    invjday(overpass.jdstart ,0 ,true , year, mon, day, hr, minute, sec);
-    Serial.printf(PSTR("Overpass %4d-%02d-%02d\n"), year, mon, day);
-    Serial.printf(PSTR("  Start: az=%lf at %02d:%02d:%02lf\n"), overpass.azstart, hr, minute, sec);
-    invjday(overpass.jdmax ,0 ,true , year, mon, day, hr, minute, sec);
-    Serial.printf(PSTR("  Max: elev=%lf at %02d:%02d:%02lf\n"), overpass.maxelevation, hr, minute, sec);
-    invjday(overpass.jdstop ,0 ,true , year, mon, day, hr, minute, sec);
-    Serial.printf(PSTR("  Stop: az=%lf at %02d:%02d:%02lf\n"), overpass.azstop, hr, minute, sec);
+    invjday(overpass.jdstart ,0 ,true , yr, mon, dy, hr, mn, sec);
+    Serial.printf(PSTR("Overpass %4d-%02d-%02d\n"), yr, mon, dy);
+    Serial.printf(PSTR("  Start: az=%lf at %02d:%02d:%02lf\n"), overpass.azstart, hr, mn, sec);
+    invjday(overpass.jdmax ,0 ,true , yr, mon, dy, hr, mn, sec);
+    Serial.printf(PSTR("  Max: elev=%lf at %02d:%02d:%02lf\n"), overpass.maxelevation, hr, mn, sec);
+    invjday(overpass.jdstop ,0 ,true , yr, mon, dy, hr, mn, sec);
+    Serial.printf(PSTR("  Stop: az=%lf at %02d:%02d:%02lf\n"), overpass.azstop, hr, mn, sec);
   }else{
     Serial.print(F("Could not find satellite pass.\n"));
   }
@@ -318,46 +329,42 @@ void setup() {
 
 void loop() {   // non blocking loop, no delays or blocking calls
 
-  while(GPS.available()){       // read available gps data
-    GPS.read();
-  }
+  GPS.read();
   if (GPS.newNMEAreceived()) {  // parse nmea
     GPS.parse(GPS.lastNMEA());
   }
-  if(GPS.fix && GPS.seconds != gps_oldsecond){    // TODO: fallback to internal RTC (battery backed)
-    gps_oldsecond = GPS.seconds;
-    sat.site(GPS.latitudeDegrees, GPS.longitudeDegrees, GPS.altitude);
-    jday((int)2000 + GPS.year, GPS.month, GPS.day, GPS.hour, GPS.minute, GPS.seconds, 0, false, jdt);
-    sat.findsat(jdt);
+
+  if(second() != oldsecond){    // use system RTC
+    oldsecond = second();
+    jday(year(), month(), day(), hour(), minute(), second(), 0, false, rtc_jdt);
+    if(GPS.fix && GPS.secondsSinceTime() < 3.0){
+      jday((int)2000 + GPS.year, GPS.month, GPS.day, GPS.hour, GPS.minute, GPS.seconds, 0, false, gps_jdt);
+      if(rtc_jdt > gps_jdt + 0.00005 || rtc_jdt < gps_jdt - 0.00005){  // ~4s tolerance for setting rtc
+        Serial.println(F("Setting system time from gps."));
+        setTime(GPS.hour, GPS.minute, GPS.seconds, GPS.day, GPS.month, GPS.year);
+        jday(year(), month(), day(), hour(), minute(), second(), 0, false, rtc_jdt);
+      }
+      sat.site(GPS.latitudeDegrees, GPS.longitudeDegrees, GPS.altitude);
+    }
+    rtc_jdt -= (double) 10 / 86400;   // calculate speed over positions separated by 10s
+    sat.findsat(rtc_jdt);
     dist_old = sat.satDist;
-    jdt += (double) 10 / 86400;   // calculate speed over positions separated by 10s
-    sat.findsat(jdt);
+    rtc_jdt += (double) 10 / 86400;
+    sat.findsat(rtc_jdt);
     sat_speed = (dist_old - sat.satDist) / 10;
     uplink_doppler = uplink - sat_speed / 29979 * uplink / 10;  // deciherz
     downlink_doppler = downlink + sat_speed / 29979 * downlink / 10;
-
     Serial.printf(PSTR("Sat %s: Az %.0lf, El %.0lf, Speed %.2lf km/s\n"), sat.satName, sat.satAz, sat.satEl, sat_speed);
     if(disp_mode==1 || disp_mode==2) updateDisplay();
   }
 
   if(Serial.available()){     // USB serial as manager, taking single byte commands for simplicity
     char c = Serial.read();
-    if(c=='1'){
-      Serial.println("read_freq 1");
-      r1.write(read_freq, sizeof(read_freq));
-      r1_time = millis();
-      r1_req=5;
-    }else if(c=='2'){
-      Serial.println("read_freq 2");
-      r2.write(read_freq, sizeof(read_freq));
-      r2_time = millis();
-      r2_req=5;
-
-    }else if(c=='3'){   // show radio
+    if(c=='1'){   // show radio
       disp_mode=0;
-    }else if(c=='4'){   // show satellite
+    }else if(c=='2'){   // show satellite
       disp_mode=1;
-    }else if(c=='5'){   // show time
+    }else if(c=='3'){   // show time
       disp_mode=2;
 
     }else if(c=='r'){
@@ -410,6 +417,9 @@ void loop() {   // non blocking loop, no delays or blocking calls
     }else if(c=='g'){ // show gps
       Serial.printf(PSTR("Time: %2d:%2d:%2d\n"), GPS.hour, GPS.minute, GPS.seconds);
       Serial.printf(PSTR("Latitude: %.3f, Longitude: %.3f\n"), GPS.latitudeDegrees, GPS.longitudeDegrees);
+
+    }else if(c=='T'){ // temporarily enter timesync mode, 100ms blocking!
+      processSyncMessage();
     }
   }
 
