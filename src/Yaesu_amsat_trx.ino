@@ -26,6 +26,13 @@
 #define DC_PIN   4
 #define SDCS_PIN 5
 
+// encoder + button
+#define ENC_SEL  6
+#define ENC_A    9
+#define ENC_B    10
+//#define ENCODER_USE_INTERRUPTS
+#define BOUNCE_WITH_PROMPT_DETECTION
+
 #define NUM_SAT_CONF    16    // max number of satellites read from config
 
 #define BLACK           0x0000
@@ -45,6 +52,8 @@
 #include <SdFat.h>
 #include <SPI.h>
 #include <Sgp4.h>
+#include <Encoder.h>
+#include <Bounce2.h>
 
 Adafruit_SSD1351 tft = Adafruit_SSD1351(SCREEN_WIDTH, SCREEN_HEIGHT, &SPI, CS_PIN, DC_PIN, RST_PIN);
 SdFs sd;
@@ -54,6 +63,8 @@ HardwareSerial& r2 = Serial2;  // Radio 2: T4.0 RX 7, TX 8 / T3.2 RX 9, TX 10
 HardwareSerial& gpsport = Serial3;  // GPS: T4.0 RX 15, TX 14 / T3.2 RX 7, TX 8
 Adafruit_GPS GPS(&gpsport);
 Sgp4 sat;
+Encoder myEnc(ENC_A, ENC_B);
+Bounce btn = Bounce();
 
 char write_freq[5] = {0,0,0,0,0x01};  // write frequency
 char read_freq[5] = {0,0,0,0,0x03};   // read frequency and mode
@@ -73,6 +84,8 @@ byte gps_oldsecond, disp_mode, disp_oldmode = 255;
 int oldsecond;
 long downlink, uplink, downlink_doppler, uplink_doppler; // deciherz, same as frequency resolution
 unsigned long norad;  // norad ID
+long enc_pos, enc_old;
+byte btn_mode;
 
 typedef enum { MODE_UNK, MODE_FM, MODE_USB, MODE_LSB } radio_mode;
 
@@ -130,7 +143,7 @@ void updateDisplay(){
     tft.fillScreen(BLACK);
     tft.setTextColor(WHITE, BLACK);
   }
-  if(disp_mode==0){
+  if(disp_mode==0){   // Display radio info
     tft.setCursor(0,0);
     tft.setTextSize(1);
     tft.print(F("Radio 1: RX"));
@@ -145,7 +158,7 @@ void updateDisplay(){
     if(r2_freq == 1) tft.print(F("Timeout.  "));
     else tft.printf("%03li.%03li.%02li", r2_freq/100000, r2_freq/100 % 1000, r2_freq % 100);
 
-  }else if(disp_mode==1){
+  }else if(disp_mode==1){   // Display satellite and doppler info
     tft.setCursor(0,0);
     tft.setTextSize(1);
     tft.printf(PSTR("Sat: %s\n"), sat.satName);
@@ -156,15 +169,21 @@ void updateDisplay(){
     tft.printf(PSTR("DL: %9li %5.0lf\n"), downlink*10, (double)sat_speed / 29979 * downlink);
     tft.printf(PSTR("DD: %9li\n"), downlink_doppler*10);
 
-  }else if(disp_mode==2){
+  }else if(disp_mode==2){   // Display system info
     tft.setCursor(0,0);
     tft.setTextSize(1);
     tft.printf(PSTR("System time: %02d:%02d:%02d"), hour(), minute(), second());
     tft.printf(PSTR("GPS time:    %02d:%02d:%02d"), GPS.hour, GPS.minute, GPS.seconds);
+    tft.printf(PSTR("GPS lock: %d (s:%2d)\n"), GPS.fixquality, GPS.satellites);
+    tft.printf(PSTR("Latitude: %lf\n"), GPS.latitudeDegrees);
+    tft.printf(PSTR("Longitude: %lf\n"), GPS.longitudeDegrees);
 
   }else{
     disp_mode=0;
   }
+  tft.setTextSize(0);
+  tft.setCursor(SCREEN_WIDTH - 32, SCREEN_HEIGHT - 8);
+  tft.printf(PSTR("%1d %3d"), btn_mode % 10, (byte) enc_pos % 256);
 }
 
 time_t getTeensy3Time()
@@ -299,6 +318,9 @@ void readTLE(int noradID){
 }
 
 void setup() {
+  btn.attach(ENC_SEL, INPUT_PULLUP);
+  btn.interval(10);
+  myEnc.write(0);
   Serial.begin(115200);   // USB Serial monitor
   r1.begin(9600);         // Radio 1
   r2.begin(9600);         // Radio 2
@@ -313,7 +335,7 @@ void setup() {
   GPS.begin(9600);        // make sure your module settings matches this, common 4800 or 9600
 
   tft.begin();
-  tft.setRotation(2);     // rotate display 180 deg if necessary
+  //tft.setRotation(2);     // rotate display 180 deg if necessary
   updateDisplay();        // draw display
   
   if (!sd.begin(SdSpiConfig(SDCS_PIN, SHARED_SPI, 20))) {
@@ -328,6 +350,26 @@ void setup() {
 }
 
 void loop() {   // non blocking loop, no delays or blocking calls
+
+  btn.update();
+  if(btn.fell()){
+    btn_mode++;
+    btn_mode%=2;
+    updateDisplay();
+  }
+  enc_pos = myEnc.read() >> 2;  // divide down to mechanical steps if needed
+  if(enc_pos != enc_old){
+    enc_old = enc_pos;
+  }
+
+  if(btn_mode == 0){
+    disp_mode = abs(enc_pos) % 3;
+    updateDisplay();    // needs to be rate limited
+  } else {
+    
+  }
+
+
 
   GPS.read();
   if (GPS.newNMEAreceived()) {  // parse nmea
