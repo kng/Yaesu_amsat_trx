@@ -79,8 +79,8 @@ unsigned long r1_time, r2_time, poll_time, sat_time;   // millis on last command
 const int intervals[2] = {1000,100};    // slow/fast polling interval
 unsigned int poll_interval, timeout = 50;  // in ms
 float vfo_factor;   // factor between the vfo's at locking
-double gps_jdt, rtc_jdt, dist_old, sat_speed; // julian date, old sat distance
-byte gps_oldsecond, disp_mode, disp_oldmode = 255;
+double gps_jdt, rtc_jdt, aos, los, dist_old, sat_speed; // julian date, old sat distance
+byte gps_oldsecond, gps_nmea, disp_mode, disp_oldmode = 255, sat_predicted = 255;
 int oldsecond;
 long downlink, uplink, downlink_doppler, uplink_doppler; // deciherz, same as frequency resolution
 unsigned long norad;  // norad ID
@@ -172,11 +172,21 @@ void updateDisplay(){
   }else if(disp_mode==2){   // Display system info
     tft.setCursor(0,0);
     tft.setTextSize(1);
-    tft.printf(PSTR("System time: %02d:%02d:%02d"), hour(), minute(), second());
-    tft.printf(PSTR("GPS time:    %02d:%02d:%02d"), GPS.hour, GPS.minute, GPS.seconds);
-    tft.printf(PSTR("GPS lock: %d (s:%2d)\n"), GPS.fixquality, GPS.satellites);
-    tft.printf(PSTR("Latitude: %lf\n"), GPS.latitudeDegrees);
+    tft.printf(PSTR("System time: %02d:%02d:%02d\n"), hour(), minute(), second());
+    tft.printf(PSTR("GPS time:    %02d:%02d:%02d\n"), GPS.hour, GPS.minute, GPS.seconds);
+    double aost = aos - rtc_jdt, lost = los - rtc_jdt;
+    if(aost < 1.0 && lost < 1.0){
+      tft.printf(PSTR("AOS in:      %02d:%02d:%02d\n"), int(aost * 24), int(aost * 1440) % 60, int(aost * 86400) % 60);
+      tft.printf(PSTR("LOS in:      %02d:%02d:%02d\n"), int(lost * 24), int(lost * 1440) % 60, int(lost * 86400) % 60);
+    }else{
+      tft.print(F("AOS in:  > 1 day\nLOS in:  > 1 day\n"));
+    }
+    tft.printf(PSTR("GPS lock:  %d (s:%2d)\n"), GPS.fixquality, GPS.satellites);
+    tft.printf(PSTR("Latitude:  %lf\n"), GPS.latitudeDegrees);
     tft.printf(PSTR("Longitude: %lf\n"), GPS.longitudeDegrees);
+    char mh[7];
+    maidenhead(mh, GPS.latitudeDegrees, GPS.longitudeDegrees);
+    tft.printf(PSTR("Locator:   %s\n"), mh);
 
   }else{
     disp_mode=0;
@@ -251,21 +261,17 @@ void readConf(){
     downlink = 14596000;
     uplink = 43514000;
   }else{
-    //norad = satellites[sat_ptr].norad;
-    //downlink = satellites[sat_ptr].downlink_qrg/10;
-    //uplink = satellites[sat_ptr].uplink_qrg/10;
-    loadSat();  // proper time/pos probably not set yet...
+    loadSat();
     Serial.printf(PSTR("Satellites loaded: %d\n"), sat_num);
   }
 }
 
 void loadSat(void){
-  //Serial.printf(PSTR("Satellite selected: %d\n"), sat_ptr);
   norad = satellites[sat_ptr].norad;
   downlink = satellites[sat_ptr].downlink_qrg/10;
   uplink = satellites[sat_ptr].uplink_qrg/10;
   readTLE(norad);
-  findPass();
+  sat_predicted = 0;
 }
 
 void findPass(void){
@@ -274,6 +280,9 @@ void findPass(void){
   jday(year(), month(), day(), hour(), minute(), second(), 0, false, rtc_jdt);
   sat.initpredpoint(rtc_jdt, 0.0);
   if(sat.nextpass(&overpass,20)==1){
+    aos = overpass.jdstart;
+    los = overpass.jdstop;
+    sat_predicted = 1;
     invjday(overpass.jdstart ,0 ,true , yr, mon, dy, hr, mn, sec);
     Serial.printf(PSTR("Overpass %4d-%02d-%02d\n"), yr, mon, dy);
     Serial.printf(PSTR("  Start: az=%lf at %02d:%02d:%02lf\n"), overpass.azstart, hr, mn, sec);
@@ -283,6 +292,7 @@ void findPass(void){
     Serial.printf(PSTR("  Stop: az=%lf at %02d:%02d:%02lf\n"), overpass.azstop, hr, mn, sec);
   }else{
     Serial.print(F("Could not find satellite pass.\n"));
+    sat_predicted = 255;
   }
 }
 
@@ -317,6 +327,18 @@ void readTLE(int noradID){
   Serial.printf(PSTR("Sat init: %s\n"), sat.satName);
 }
 
+void maidenhead(char mh[7], double lat, double lon){
+  unsigned int lati = lat * 100000 + 9000000;
+  unsigned int loni = lon * 100000 + 18000000;
+  mh[0] = 'A' + loni / 2000000;
+  mh[1] = 'A' + lati / 1000000;
+  mh[2] = '0' + (loni % 2000000) / 200000;
+  mh[3] = '0' + (lati % 1000000) / 100000;
+  mh[4] = 'a' + (loni %  200000) /   8333;
+  mh[5] = 'a' + (lati %  100000) /   4166;
+  mh[6] = 0; // asciiz
+}
+
 void setup() {
   btn.attach(ENC_SEL, INPUT_PULLUP);
   btn.interval(10);
@@ -342,8 +364,7 @@ void setup() {
     sd.initErrorHalt(&Serial);
   }
   //sd.ls(LS_DATE | LS_SIZE); // show files on card
-  readConf();             // read config
-  readTLE(norad);         // search and load TLE from file
+  readConf();             // read config and load TLE from file
 
   poll_interval = intervals[0];
   poll_time = millis();
@@ -364,12 +385,8 @@ void loop() {   // non blocking loop, no delays or blocking calls
 
   if(btn_mode == 0){
     disp_mode = abs(enc_pos) % 3;
-    updateDisplay();    // needs to be rate limited
-  } else {
-    
+    if(disp_mode != disp_oldmode) updateDisplay();    // needs to be rate limited
   }
-
-
 
   GPS.read();
   if (GPS.newNMEAreceived()) {  // parse nmea
@@ -379,15 +396,19 @@ void loop() {   // non blocking loop, no delays or blocking calls
   if(second() != oldsecond){    // use system RTC
     oldsecond = second();
     jday(year(), month(), day(), hour(), minute(), second(), 0, false, rtc_jdt);
-    if(GPS.fix && GPS.secondsSinceTime() < 3.0){
+    if(GPS.fix && GPS.secondsSinceTime() < 3.0 && millis() > 5000){
       jday((int)2000 + GPS.year, GPS.month, GPS.day, GPS.hour, GPS.minute, GPS.seconds, 0, false, gps_jdt);
       if(rtc_jdt > gps_jdt + 0.00005 || rtc_jdt < gps_jdt - 0.00005){  // ~4s tolerance for setting rtc
         Serial.println(F("Setting system time from gps."));
         setTime(GPS.hour, GPS.minute, GPS.seconds, GPS.day, GPS.month, GPS.year);
         jday(year(), month(), day(), hour(), minute(), second(), 0, false, rtc_jdt);
+        sat_predicted = 0;
       }
       sat.site(GPS.latitudeDegrees, GPS.longitudeDegrees, GPS.altitude);
     }
+    if(second() == 0) Serial.printf(PSTR("AOS in: %lf, LOS in: %lf minutes.\n"), (aos - rtc_jdt) * 1440, (los - rtc_jdt) * 1440);
+    if(los < rtc_jdt && sat_predicted == 1) sat_predicted = 0;   // check for LOS and run new predict
+    if(sat_predicted == 0) findPass();
     rtc_jdt -= (double) 10 / 86400;   // calculate speed over positions separated by 10s
     sat.findsat(rtc_jdt);
     dist_old = sat.satDist;
@@ -396,8 +417,8 @@ void loop() {   // non blocking loop, no delays or blocking calls
     sat_speed = (dist_old - sat.satDist) / 10;
     uplink_doppler = uplink - sat_speed / 29979 * uplink / 10;  // deciherz
     downlink_doppler = downlink + sat_speed / 29979 * downlink / 10;
-    Serial.printf(PSTR("Sat %s: Az %.0lf, El %.0lf, Speed %.2lf km/s\n"), sat.satName, sat.satAz, sat.satEl, sat_speed);
-    if(disp_mode==1 || disp_mode==2) updateDisplay();
+    if(second() == 0) Serial.printf(PSTR("Sat %s: Az %.0lf, El %.0lf, Speed %.2lf km/s\n"), sat.satName, sat.satAz, sat.satEl, sat_speed);
+    if(disp_mode==1 || disp_mode==2) updateDisplay();  // disp mode 0 is triggered from the radio response
   }
 
   if(Serial.available()){     // USB serial as manager, taking single byte commands for simplicity
@@ -470,10 +491,6 @@ void loop() {   // non blocking loop, no delays or blocking calls
     for(int i=0;i<r1_req;i++) r1_read[i] = r1.read();
     if(r1_req == 5){                                    // frequency response
       r1_freq = from_bcd_be(r1_read);                   // convert bcd array to long
-      //Serial.print("r1_freq: ");
-      //Serial.println(r1_freq);
-    }else{                                              // single byte response
-      Serial.println(r1_read[0], HEX);
     }
     r1_req=0;                                           // clear request length
     if(disp_mode==0) updateDisplay();
@@ -491,10 +508,6 @@ void loop() {   // non blocking loop, no delays or blocking calls
     for(int i=0;i<r2_req;i++) r2_read[i] = r2.read();
     if(r2_req == 5){                                    // frequency response
       r2_freq = from_bcd_be(r2_read);                   // convert bcd array to long
-      //Serial.print("r2_freq: ");
-      //Serial.println(r2_freq);
-    }else{                                              // single byte response
-      Serial.println(r2_read[0], HEX);
     }
     r2_req=0;                                           // clear request length
     if(disp_mode==0) updateDisplay();
@@ -537,6 +550,16 @@ void loop() {   // non blocking loop, no delays or blocking calls
       //r1.write(write_freq, sizeof(write_freq));
       //to_bcd_be(write_freq, r2_freq, 8);
       //r2.write(write_freq, sizeof(write_freq));
+
+      /*
+        State machine for both radios:
+        read rxs or txs from both
+        read freq from both
+        if rx freq has changed, add this to both
+        if not in transmit, tx freq has changed, add this to tx
+        if in transmit, the freq command has no effect, so no need to send it
+        calculate new doppler and send it to the radios
+      */
     }
   }else if(r1_lock == 4){ // doppler forced
     if(millis() - poll_time >= poll_interval){
