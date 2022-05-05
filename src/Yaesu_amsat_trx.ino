@@ -58,6 +58,7 @@
 Adafruit_SSD1351 tft = Adafruit_SSD1351(SCREEN_WIDTH, SCREEN_HEIGHT, &SPI, CS_PIN, DC_PIN, RST_PIN);
 SdFs sd;
 FsFile file;
+usb_serial_class& term = Serial;  // USB serial terminal
 HardwareSerial& r1 = Serial1;  // Radio 1: T4.0 RX 0, TX 1 / T3.2 RX 0, TX 1
 HardwareSerial& r2 = Serial2;  // Radio 2: T4.0 RX 7, TX 8 / T3.2 RX 9, TX 10
 HardwareSerial& gpsport = Serial3;  // GPS: T4.0 RX 15, TX 14 / T3.2 RX 7, TX 8
@@ -74,8 +75,8 @@ char read_txs[5] = {0,0,0,0,0xF7};    // read transmitter status
 char r1_read[10], r2_read[10];  // RX buffer from radio
 byte r1_req, r2_req;            // RX bytes requested
 long r1_freq, r1_oldfreq, r1_lockfreq, r2_freq, r2_oldfreq, r2_lockfreq;
-byte r1_lock, r2_lock;  // locking mode, selecting master/slave
-unsigned long r1_time, r2_time, poll_time, sat_time;   // millis on last command, last poll
+byte r_state, r1_lock, r2_lock;  // locking mode, selecting master/slave
+unsigned long r1_time, r2_time, poll_time, sat_time, disp_time;   // millis on last command, last poll
 const int intervals[2] = {1000,100};    // slow/fast polling interval
 unsigned int poll_interval, timeout = 50;  // in ms
 float vfo_factor;   // factor between the vfo's at locking
@@ -138,6 +139,8 @@ radio_mode str2mode(char *str, size_t sze){
 }
 
 void updateDisplay(){
+  if(millis() - disp_time < 200) return;  // rate limiting
+  disp_time = millis();
   if(disp_oldmode != disp_mode){
     disp_oldmode = disp_mode;
     tft.fillScreen(BLACK);
@@ -172,12 +175,12 @@ void updateDisplay(){
   }else if(disp_mode==2){   // Display system info
     tft.setCursor(0,0);
     tft.setTextSize(1);
-    tft.printf(PSTR("System time: %02d:%02d:%02d\n"), hour(), minute(), second());
-    tft.printf(PSTR("GPS time:    %02d:%02d:%02d\n"), GPS.hour, GPS.minute, GPS.seconds);
+    tft.printf(PSTR("Sys time:  %02d:%02d:%02d\n"), hour(), minute(), second());
+    tft.printf(PSTR("GPS time:  %02d:%02d:%02d\n"), GPS.hour, GPS.minute, GPS.seconds);
     double aost = aos - rtc_jdt, lost = los - rtc_jdt;
     if(aost < 1.0 && lost < 1.0){
-      tft.printf(PSTR("AOS in:      %02d:%02d:%02d\n"), int(aost * 24), int(aost * 1440) % 60, int(aost * 86400) % 60);
-      tft.printf(PSTR("LOS in:      %02d:%02d:%02d\n"), int(lost * 24), int(lost * 1440) % 60, int(lost * 86400) % 60);
+      tft.printf(PSTR("AOS in:    %02d:%02d:%02d\n"), int(aost * 24), int(aost * 1440) % 60, int(aost * 86400) % 60);   // TODO: handle negative numbers
+      tft.printf(PSTR("LOS in:    %02d:%02d:%02d\n"), int(lost * 24), int(lost * 1440) % 60, int(lost * 86400) % 60);
     }else{
       tft.print(F("AOS in:  > 1 day\nLOS in:  > 1 day\n"));
     }
@@ -202,12 +205,12 @@ time_t getTeensy3Time()
 }
 
 void processSyncMessage() {
-  Serial.setTimeout(100);   // allow 100ms for time message
-  time_t t = Serial.parseInt();
+  term.setTimeout(100);   // allow 100ms for time message
+  time_t t = term.parseInt();
   if (t != 0) {
     Teensy3Clock.set(t);
     setTime(t);
-    Serial.println(F("Time set via sync message."));
+    term.println(F("Time set via sync message."));
   }
 }
 
@@ -250,19 +253,19 @@ void readConf(){
       file.close();
       confLoaded = true;
     }else{
-      Serial.println(F("cannot find satellites.txt"));
+      term.println(F("cannot find satellites.txt"));
     }
   }else{
-    Serial.println(F("uknown filesystem on SD"));
+    term.println(F("uknown filesystem on SD"));
   }
   if(!confLoaded){
-    Serial.println(F("Failed to load configuration, defaults used."));
+    term.println(F("Failed to load configuration, defaults used."));
     norad = 39444;
     downlink = 14596000;
     uplink = 43514000;
   }else{
     loadSat();
-    Serial.printf(PSTR("Satellites loaded: %d\n"), sat_num);
+    term.printf(PSTR("Satellites loaded: %d\n"), sat_num);
   }
 }
 
@@ -279,19 +282,21 @@ void findPass(void){
   int yr, mon, dy, hr, mn; double sec;
   jday(year(), month(), day(), hour(), minute(), second(), 0, false, rtc_jdt);
   sat.initpredpoint(rtc_jdt, 0.0);
-  if(sat.nextpass(&overpass,20)==1){
+  while(sat.nextpass(&overpass,20)==1 && sat_predicted != 1){
+    if(overpass.jdstop < rtc_jdt) continue; // skip predictions in the past
     aos = overpass.jdstart;
     los = overpass.jdstop;
     sat_predicted = 1;
     invjday(overpass.jdstart ,0 ,true , yr, mon, dy, hr, mn, sec);
-    Serial.printf(PSTR("Overpass %4d-%02d-%02d\n"), yr, mon, dy);
-    Serial.printf(PSTR("  Start: az=%lf at %02d:%02d:%02lf\n"), overpass.azstart, hr, mn, sec);
+    term.printf(PSTR("Overpass %4d-%02d-%02d\n"), yr, mon, dy);
+    term.printf(PSTR("  Start: az=%lf at %02d:%02d:%02lf\n"), overpass.azstart, hr, mn, sec);
     invjday(overpass.jdmax ,0 ,true , yr, mon, dy, hr, mn, sec);
-    Serial.printf(PSTR("  Max: elev=%lf at %02d:%02d:%02lf\n"), overpass.maxelevation, hr, mn, sec);
+    term.printf(PSTR("  Max: elev=%lf at %02d:%02d:%02lf\n"), overpass.maxelevation, hr, mn, sec);
     invjday(overpass.jdstop ,0 ,true , yr, mon, dy, hr, mn, sec);
-    Serial.printf(PSTR("  Stop: az=%lf at %02d:%02d:%02lf\n"), overpass.azstop, hr, mn, sec);
-  }else{
-    Serial.print(F("Could not find satellite pass.\n"));
+    term.printf(PSTR("  Stop: az=%lf at %02d:%02d:%02lf\n"), overpass.azstop, hr, mn, sec);
+  }
+  if(sat_predicted != 1){
+    term.print(F("Could not find satellite pass.\n"));
     sat_predicted = 255;
   }
 }
@@ -313,18 +318,18 @@ void readTLE(int noradID){
       }
       file.close();
     }else{
-      Serial.println(F("cannot find nasabare.txt"));
+      term.println(F("cannot find nasabare.txt"));
     }
   }
   if(!tleloaded){ // failed to load, use hardcoded
-    Serial.println(F("Failed to find satellite, using hardcoded."));
+    term.println(F("Failed to find satellite, using hardcoded."));
     strncpy_P(row1, PSTR("AO-73 (hardcoded)"), sizeof(row1)); // TLE date 2022-04-13
     strncpy_P(row2, PSTR("1 39444U 13066AE  22097.48225341  .00003217  00000-0  39123-3 0  9993"), sizeof(row2));
     strncpy_P(row3, PSTR("2 39444  97.6190  74.6247 0055298 265.9560  93.5332 14.83068053451003"), sizeof(row3));
   }
   sat.init(row1, row2, row3);     //initialize satellite parameters
-  //Serial.printf(PSTR("satname: %s\ntle1: %s\ntle2: %s\n"), satname, tle_line1, tle_line2);
-  Serial.printf(PSTR("Sat init: %s\n"), sat.satName);
+  //term.printf(PSTR("satname: %s\ntle1: %s\ntle2: %s\n"), satname, tle_line1, tle_line2);
+  term.printf(PSTR("Sat init: %s\n"), sat.satName);
 }
 
 void maidenhead(char mh[7], double lat, double lon){
@@ -342,16 +347,16 @@ void maidenhead(char mh[7], double lat, double lon){
 void setup() {
   btn.attach(ENC_SEL, INPUT_PULLUP);
   btn.interval(10);
-  myEnc.write(0);
-  Serial.begin(115200);   // USB Serial monitor
+  myEnc.write(2);         // use offset 2 for 4x rotary encoders, one mechanical step = 4 state changes, to put the transition between the steps
+  term.begin(115200);     // USB Serial monitor
   r1.begin(9600);         // Radio 1
   r2.begin(9600);         // Radio 2
   setSyncProvider(getTeensy3Time);
-  while (!Serial && millis() < 2000);   // wait 2s for serial monitor
+  while (!term && millis() < 2000);   // wait 2s for serial monitor
 
-  Serial.println(F("Yaesu amsat trx with dual FT-817/818/857. By: Daniel SA2KNG."));
+  term.println(F("Yaesu amsat trx with dual FT-817/818/857. By: Daniel SA2KNG."));
   if (timeStatus()!= timeSet) {
-    Serial.println(F("Unable to sync with the RTC"));
+    term.println(F("Unable to sync with the RTC"));
   }
 
   GPS.begin(9600);        // make sure your module settings matches this, common 4800 or 9600
@@ -361,7 +366,7 @@ void setup() {
   updateDisplay();        // draw display
   
   if (!sd.begin(SdSpiConfig(SDCS_PIN, SHARED_SPI, 20))) {
-    sd.initErrorHalt(&Serial);
+    sd.initErrorHalt(&term);
   }
   //sd.ls(LS_DATE | LS_SIZE); // show files on card
   readConf();             // read config and load TLE from file
@@ -399,14 +404,14 @@ void loop() {   // non blocking loop, no delays or blocking calls
     if(GPS.fix && GPS.secondsSinceTime() < 3.0 && millis() > 5000){
       jday((int)2000 + GPS.year, GPS.month, GPS.day, GPS.hour, GPS.minute, GPS.seconds, 0, false, gps_jdt);
       if(rtc_jdt > gps_jdt + 0.00005 || rtc_jdt < gps_jdt - 0.00005){  // ~4s tolerance for setting rtc
-        Serial.println(F("Setting system time from gps."));
+        term.println(F("Setting system time from gps."));
         setTime(GPS.hour, GPS.minute, GPS.seconds, GPS.day, GPS.month, GPS.year);
         jday(year(), month(), day(), hour(), minute(), second(), 0, false, rtc_jdt);
         sat_predicted = 0;
       }
       sat.site(GPS.latitudeDegrees, GPS.longitudeDegrees, GPS.altitude);
     }
-    if(second() == 0) Serial.printf(PSTR("AOS in: %lf, LOS in: %lf minutes.\n"), (aos - rtc_jdt) * 1440, (los - rtc_jdt) * 1440);
+    if(second() == 0) term.printf(PSTR("AOS in: %lf, LOS in: %lf minutes.\n"), (aos - rtc_jdt) * 1440, (los - rtc_jdt) * 1440);
     if(los < rtc_jdt && sat_predicted == 1) sat_predicted = 0;   // check for LOS and run new predict
     if(sat_predicted == 0) findPass();
     rtc_jdt -= (double) 10 / 86400;   // calculate speed over positions separated by 10s
@@ -417,12 +422,12 @@ void loop() {   // non blocking loop, no delays or blocking calls
     sat_speed = (dist_old - sat.satDist) / 10;
     uplink_doppler = uplink - sat_speed / 29979 * uplink / 10;  // deciherz
     downlink_doppler = downlink + sat_speed / 29979 * downlink / 10;
-    if(second() == 0) Serial.printf(PSTR("Sat %s: Az %.0lf, El %.0lf, Speed %.2lf km/s\n"), sat.satName, sat.satAz, sat.satEl, sat_speed);
+    if(second() == 0) term.printf(PSTR("Sat %s: Az %.0lf, El %.0lf, Speed %.2lf km/s\n"), sat.satName, sat.satAz, sat.satEl, sat_speed);
     if(disp_mode==1 || disp_mode==2) updateDisplay();  // disp mode 0 is triggered from the radio response
   }
 
-  if(Serial.available()){     // USB serial as manager, taking single byte commands for simplicity
-    char c = Serial.read();
+  if(term.available()){     // USB serial as manager, taking single byte commands for simplicity
+    char c = term.read();
     if(c=='1'){   // show radio
       disp_mode=0;
     }else if(c=='2'){   // show satellite
@@ -431,12 +436,12 @@ void loop() {   // non blocking loop, no delays or blocking calls
       disp_mode=2;
 
     }else if(c=='r'){
-      Serial.println("read_rxs 1");
+      term.println("read_rxs 1");
       r1.write(read_rxs, sizeof(read_rxs));
       r1_time = millis();
       r1_req=1;
     }else if(c=='t'){
-      Serial.println("read_txs 1");
+      term.println("read_txs 1");
       r1.write(read_txs, sizeof(read_txs));
       r1_time = millis();
       r1_req=1;
@@ -460,7 +465,8 @@ void loop() {   // non blocking loop, no delays or blocking calls
       r1_lock = 0;    // independent
       r2_lock = 0;
     }else if(c=='d'){ // doppler soft controlled, for linears
-      poll_time = 0;
+      poll_interval = intervals[0];
+      poll_time = millis();
       r1_lock = 3;
       r2_lock = 3;
     }else if(c=='D'){ // doppler forced, for fm
@@ -478,8 +484,8 @@ void loop() {   // non blocking loop, no delays or blocking calls
       loadSat();
 
     }else if(c=='g'){ // show gps
-      Serial.printf(PSTR("Time: %2d:%2d:%2d\n"), GPS.hour, GPS.minute, GPS.seconds);
-      Serial.printf(PSTR("Latitude: %.3f, Longitude: %.3f\n"), GPS.latitudeDegrees, GPS.longitudeDegrees);
+      term.printf(PSTR("Time: %2d:%2d:%2d\n"), GPS.hour, GPS.minute, GPS.seconds);
+      term.printf(PSTR("Latitude: %.3f, Longitude: %.3f\n"), GPS.latitudeDegrees, GPS.longitudeDegrees);
 
     }else if(c=='T'){ // temporarily enter timesync mode, 100ms blocking!
       processSyncMessage();
@@ -487,36 +493,36 @@ void loop() {   // non blocking loop, no delays or blocking calls
   }
 
   // parse responses from radio 1
-  if(r1_req > 0 && r1.available() == r1_req){           // does the response match the request ?
+  if(r1_req > 0 && r1_req < 10 && r1.available() == r1_req){           // does the response match the request ?
     for(int i=0;i<r1_req;i++) r1_read[i] = r1.read();
     if(r1_req == 5){                                    // frequency response
       r1_freq = from_bcd_be(r1_read);                   // convert bcd array to long
     }
     r1_req=0;                                           // clear request length
     if(disp_mode==0) updateDisplay();
-  }else if(r1_req == 0 && r1.available()){              // flush unrequested data
+  }else if((r1_req == 0 || r1_req > 9) && r1.available()){              // flush unrequested data
     r1.read();
   }
   if(r1_req > 0 && millis() > r1_time + timeout){       // request timeout
     r1_freq = 1;
-    r1_req = 0;
+    r1_req = 255;
     if(disp_mode==0) updateDisplay();
   }
 
   // parse responses from radio 2
-  if(r2_req > 0 && r2.available() == r2_req){           // does the response match the request ?
+  if(r2_req > 0 && r2_req < 10 && r2.available() == r2_req){           // does the response match the request ?
     for(int i=0;i<r2_req;i++) r2_read[i] = r2.read();
     if(r2_req == 5){                                    // frequency response
       r2_freq = from_bcd_be(r2_read);                   // convert bcd array to long
     }
     r2_req=0;                                           // clear request length
     if(disp_mode==0) updateDisplay();
-  }else if(r2_req == 0 && r2.available()){              // flush unrequested
+  }else if((r2_req == 0 || r2_req > 9) && r2.available()){              // flush unrequested
     r2.read();
   }
   if(r2_req > 0 && millis() > r2_time + timeout){       // request timeout
     r2_freq = 1;
-    r2_req = 0;
+    r2_req = 255;
     if(disp_mode==0) updateDisplay();
   }
 
@@ -527,39 +533,78 @@ void loop() {   // non blocking loop, no delays or blocking calls
     r1_lock = 2;
     r2_lock = 0;
     vfo_factor = (float) r2_freq / r1_freq;
-    Serial.println("Locking with radio 1 master");
-    Serial.print("vfo_factor: ");
-    Serial.println(vfo_factor);
+    term.println("Locking with radio 1 master");
+    term.print("vfo_factor: ");
+    term.println(vfo_factor);
   }else if(r1_lock == 2){
     if(r1_freq != r1_oldfreq){
       r2_freq = r2_lockfreq - vfo_factor * (r1_freq - r1_lockfreq);
       r1_oldfreq = r1_freq;
-      Serial.print("r1_freq: ");
-      Serial.println(r1_freq);
-      Serial.print("r2_freq: ");
-      Serial.println(r2_freq);
+      term.print("r1_freq: ");
+      term.println(r1_freq);
+      term.print("r2_freq: ");
+      term.println(r2_freq);
       to_bcd_be(write_freq, r2_freq, 8);
       r2.write(write_freq, sizeof(write_freq));
       if(disp_mode==0) updateDisplay();
     }
   }else if(r1_lock == 3){ // doppler controlled
-    if(poll_time != 0 && millis() - poll_time >= poll_interval){
-      poll_time = millis();
-      //r1_freq = downlink + sat_speed / 29979 * uplink
-      //to_bcd_be(write_freq, r1_freq, 8);
-      //r1.write(write_freq, sizeof(write_freq));
-      //to_bcd_be(write_freq, r2_freq, 8);
-      //r2.write(write_freq, sizeof(write_freq));
+    //r1_freq = downlink + sat_speed / 29979 * uplink
+    //to_bcd_be(write_freq, r1_freq, 8);
+    //r1.write(write_freq, sizeof(write_freq));
+    //to_bcd_be(write_freq, r2_freq, 8);
+    //r2.write(write_freq, sizeof(write_freq));
 
-      /*
-        State machine for both radios:
-        read rxs or txs from both
-        read freq from both
-        if rx freq has changed, add this to both
-        if not in transmit, tx freq has changed, add this to tx
-        if in transmit, the freq command has no effect, so no need to send it
-        calculate new doppler and send it to the radios
-      */
+    /*
+      State machine for both radios:
+      read rxs or txs from both
+      read freq from both
+      if rx freq has changed, add this to both
+      if not in transmit, tx freq has changed, add this to tx
+      if in transmit, the freq command has no effect, so no need to send it
+      calculate new doppler and send it to the radios
+    */
+    switch (r_state){
+    case 0:
+      if(millis() - poll_time >= poll_interval){
+        poll_time = r1_time = r2_time = millis();
+        r1.write(read_rxs, sizeof(read_rxs));
+        r1_req=1;
+        r2.write(read_rxs, sizeof(read_rxs));
+        r2_req=1;
+        r_state++;
+        term.println(F("Polling rxs."));
+      }
+      break;
+
+    case 1:
+      if(r1_req == 0 && r2_req == 0){ // read done
+        r_state++;
+      }else if(r1_req > 9){           // timeout
+        r_state = 0;
+      }
+      break;
+
+    case 2:
+      r1_time = r2_time = millis();
+      r1.write(read_freq, sizeof(read_freq));
+      r1_req=5;
+      r2.write(read_freq, sizeof(read_freq));
+      r2_req=5;
+      r_state++;
+      term.println(F("Polling freq."));
+      break;
+
+    case 3:
+      if(r1_req == 0 && r2_req == 0){ // read done
+        r_state++;
+      }else if(r1_req > 9){           // timeout
+        r_state = 0;
+      }
+
+    default:
+      r_state = 0;
+      break;
     }
   }else if(r1_lock == 4){ // doppler forced
     if(millis() - poll_time >= poll_interval){
@@ -567,7 +612,7 @@ void loop() {   // non blocking loop, no delays or blocking calls
       r1_freq = downlink + sat_speed / 29979 * downlink / 10;
       to_bcd_be(write_freq, r1_freq, 8);
       r1.write(write_freq, sizeof(write_freq));
-      //Serial.println(r1_freq);
+      //term.println(r1_freq);
     }
   }else{
     r1_lock = 0;
@@ -579,17 +624,17 @@ void loop() {   // non blocking loop, no delays or blocking calls
     r2_lock = 2;
     r1_lock = 0;
     vfo_factor = (float) r1_freq / r2_freq;
-    Serial.println("Locking with radio 2 master");
-    Serial.print("vfo_factor: ");
-    Serial.println(vfo_factor);
+    term.println("Locking with radio 2 master");
+    term.print("vfo_factor: ");
+    term.println(vfo_factor);
   }else if(r2_lock == 2){
     if(r2_freq != r2_oldfreq){
       r1_freq = r1_lockfreq - vfo_factor * (r2_freq - r2_lockfreq);
       r2_oldfreq = r2_freq;
-      Serial.print("r1_freq: ");
-      Serial.println(r1_freq);
-      Serial.print("r2_freq: ");
-      Serial.println(r2_freq);
+      term.print("r1_freq: ");
+      term.println(r1_freq);
+      term.print("r2_freq: ");
+      term.println(r2_freq);
       to_bcd_be(write_freq, r1_freq, 8);
       r2.write(write_freq, sizeof(write_freq));
       if(disp_mode==0) updateDisplay();
@@ -602,7 +647,7 @@ void loop() {   // non blocking loop, no delays or blocking calls
       r2_freq = uplink - sat_speed / 29979 * uplink / 10;
       to_bcd_be(write_freq, r2_freq, 8);
       r2.write(write_freq, sizeof(write_freq));
-      //Serial.println(r2_freq);
+      //term.println(r2_freq);
     }
   }else{
     r2_lock = 0;
@@ -611,7 +656,7 @@ void loop() {   // non blocking loop, no delays or blocking calls
   // auto polling of radios
   if(poll_time != 0 && millis() - poll_time >= poll_interval){
     poll_time = r1_time = r2_time = millis();
-    //Serial.println("polling radios");
+    //term.println("polling radios");
     r1.write(read_freq, sizeof(read_freq));             // TODO: reduce poll interval when timed out, hard to turn on/off radio otherwise
     r1_req=5;
     r2.write(read_freq, sizeof(read_freq));
