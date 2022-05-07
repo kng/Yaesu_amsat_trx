@@ -290,11 +290,11 @@ void findPass(void){
     sat_predicted = 1;
     invjday(overpass.jdstart ,0 ,true , yr, mon, dy, hr, mn, sec);
     term.printf(PSTR("Overpass %4d-%02d-%02d\n"), yr, mon, dy);
-    term.printf(PSTR("  Start: az=%lf at %02d:%02d:%02lf\n"), overpass.azstart, hr, mn, sec);
+    term.printf(PSTR("  Start: az=%3.0lf at %02d:%02d:%02.0lf\n"), overpass.azstart, hr, mn, sec);
     invjday(overpass.jdmax ,0 ,true , yr, mon, dy, hr, mn, sec);
-    term.printf(PSTR("  Max: elev=%lf at %02d:%02d:%02lf\n"), overpass.maxelevation, hr, mn, sec);
+    term.printf(PSTR("  Max:   el=%2.0lf  at %02d:%02d:%02.0lf\n"), overpass.maxelevation, hr, mn, sec);
     invjday(overpass.jdstop ,0 ,true , yr, mon, dy, hr, mn, sec);
-    term.printf(PSTR("  Stop: az=%lf at %02d:%02d:%02lf\n"), overpass.azstop, hr, mn, sec);
+    term.printf(PSTR("  Stop:  az=%3.0lf at %02d:%02d:%02.0lf\n"), overpass.azstop, hr, mn, sec);
   }
   if(sat_predicted != 1){
     term.print(F("Could not find satellite pass.\n"));
@@ -434,12 +434,16 @@ void loop() {   // non blocking loop, no delays or blocking calls
 
     }else if(c=='l'){ // lock vfo's
       rig_mode = RIG_MAN;
+      rig_state = 0;
     }else if(c=='u'){ // unlock vfo's
       rig_mode = RIG_FREE;
+      rig_state = 0;
     }else if(c=='d'){ // doppler soft controlled, for linears
       rig_mode = RIG_LIN;
+      rig_state = 0;
     }else if(c=='D'){ // doppler forced, for fm
       rig_mode = RIG_FORCE;
+      rig_state = 0;
 
     }else if(c=='n'){ // next satellite from conf
       sat_ptr++;
@@ -497,7 +501,7 @@ void loop() {   // non blocking loop, no delays or blocking calls
     switch (rig_state){
     case 0:
       if(millis() - poll_time >= poll_intervals[0]){
-        poll_time = r1_time = r2_time = millis();
+        r1_time = r2_time = millis();
         r1.write(read_freq, sizeof(read_freq));
         r1_req=5;
         r2.write(read_freq, sizeof(read_freq));
@@ -509,12 +513,13 @@ void loop() {   // non blocking loop, no delays or blocking calls
       if(r1_req == 0 && r2_req == 0){ // read done
         rig_state++;
       }else if(r1_req > 9 || r2_req > 9){           // timeout
-        rig_state = 0; 
+        rig_state = 255;
       }
       break;
 
     default:
       updateDisplay();
+      poll_time = millis();
       rig_state = 0;
       break;
     }
@@ -533,7 +538,7 @@ void loop() {   // non blocking loop, no delays or blocking calls
     switch (rig_state){
     case 0:
       if(millis() - poll_time >= poll_intervals[0]){
-        poll_time = r1_time = r2_time = millis();
+        r1_time = r2_time = millis();
         r1.write(read_rxs, sizeof(read_rxs));
         r1_req=1;
         r2.write(read_rxs, sizeof(read_rxs));
@@ -546,8 +551,8 @@ void loop() {   // non blocking loop, no delays or blocking calls
     case 1:
       if(r1_req == 0 && r2_req == 0){ // read done
         rig_state++;
-      }else if(r1_req > 9){           // timeout
-        rig_state=255;
+      }else if(r1_req > 9 || r2_req > 9){           // timeout
+        rig_state++;
       }
       break;
 
@@ -564,13 +569,15 @@ void loop() {   // non blocking loop, no delays or blocking calls
     case 3:
       if(r1_req == 0 && r2_req == 0){ // read done
         rig_state++;
-      }else if(r1_req > 9){           // timeout
+      }else if(r1_req > 9 || r2_req > 9){           // timeout
         rig_state = 255;
       }
+      break;
 
     default:
       term.println();
       updateDisplay();
+      poll_time = millis();
       rig_state = 0;
       break;
     }
