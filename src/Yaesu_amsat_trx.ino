@@ -75,10 +75,10 @@ char read_txs[5] = {0,0,0,0,0xF7};    // read transmitter status
 char r1_read[10], r2_read[10];  // RX buffer from radio
 byte r1_req, r2_req;            // RX bytes requested
 long r1_freq, r1_oldfreq, r1_lockfreq, r2_freq, r2_oldfreq, r2_lockfreq;
-byte r_state, r1_lock, r2_lock;  // locking mode, selecting master/slave
+byte rig_state;  // rig state machine
 unsigned long r1_time, r2_time, poll_time, sat_time, disp_time;   // millis on last command, last poll
-const int intervals[2] = {1000,100};    // slow/fast polling interval
-unsigned int poll_interval, timeout = 50;  // in ms
+unsigned int poll_intervals[2] = {1000,250};    // [0] slow, [1] fast polling interval
+unsigned int timeout = 100;  // in ms
 float vfo_factor;   // factor between the vfo's at locking
 double gps_jdt, rtc_jdt, aos, los, dist_old, sat_speed; // julian date, old sat distance
 byte gps_oldsecond, gps_nmea, disp_mode, disp_oldmode = 255, sat_predicted = 255;
@@ -88,15 +88,17 @@ unsigned long norad;  // norad ID
 long enc_pos, enc_old;
 byte btn_mode;
 
-typedef enum { MODE_UNK, MODE_FM, MODE_USB, MODE_LSB } radio_mode;
+typedef enum { MODE_UNK, MODE_FM, MODE_USB, MODE_LSB } radio_modes;
+typedef enum { RIG_FREE, RIG_LIN, RIG_FORCE, RIG_MAN } rig_modes;
+rig_modes rig_mode;
 
 typedef struct { // display name, norad, uplink_qrg, uplink_mode, downlink_qrg, downlink_mode
   char name[16];
   unsigned long norad;
   unsigned long uplink_qrg;
   unsigned long downlink_qrg;
-  radio_mode uplink_mode; // 0 unknown, 1 fm, 2 usb, 3 lsb
-  radio_mode downlink_mode;
+  radio_modes uplink_mode; // 0 unknown, 1 fm, 2 usb, 3 lsb
+  radio_modes downlink_mode;
 } satellite_conf;
 satellite_conf satellites[NUM_SAT_CONF];
 byte sat_ptr = 0, sat_num = 0;
@@ -110,7 +112,6 @@ unsigned long from_bcd_be(char* c){
     }
     return result;
 }
-
 
 char *to_bcd_be(char bcd_data[], unsigned long freq, unsigned char bcd_len){
     int i;
@@ -131,7 +132,7 @@ char *to_bcd_be(char bcd_data[], unsigned long freq, unsigned char bcd_len){
     return bcd_data;
 }
 
-radio_mode str2mode(char *str, size_t sze){
+radio_modes str2mode(char *str, size_t sze){
   if(strncmp_P(str, "fm", sze)==0) return MODE_FM;
   if(strncmp_P(str, "usb", sze)==0) return MODE_USB;
   if(strncmp_P(str, "lsb", sze)==0) return MODE_LSB;
@@ -371,7 +372,6 @@ void setup() {
   //sd.ls(LS_DATE | LS_SIZE); // show files on card
   readConf();             // read config and load TLE from file
 
-  poll_interval = intervals[0];
   poll_time = millis();
 }
 
@@ -390,7 +390,7 @@ void loop() {   // non blocking loop, no delays or blocking calls
 
   if(btn_mode == 0){
     disp_mode = abs(enc_pos) % 3;
-    if(disp_mode != disp_oldmode) updateDisplay();    // needs to be rate limited
+    if(disp_mode != disp_oldmode) updateDisplay();
   }
 
   GPS.read();
@@ -404,14 +404,15 @@ void loop() {   // non blocking loop, no delays or blocking calls
     if(GPS.fix && GPS.secondsSinceTime() < 3.0 && millis() > 5000){
       jday((int)2000 + GPS.year, GPS.month, GPS.day, GPS.hour, GPS.minute, GPS.seconds, 0, false, gps_jdt);
       if(rtc_jdt > gps_jdt + 0.00005 || rtc_jdt < gps_jdt - 0.00005){  // ~4s tolerance for setting rtc
-        term.println(F("Setting system time from gps."));
+        term.print(F("Setting system time from gps."));
+        term.printf(PSTR(" Old: %02d:%02d:%02d"), hour(), minute(), second());
         setTime(GPS.hour, GPS.minute, GPS.seconds, GPS.day, GPS.month, GPS.year);
+        term.printf(PSTR(", New: %02d:%02d:%02d\n"), hour(), minute(), second());
         jday(year(), month(), day(), hour(), minute(), second(), 0, false, rtc_jdt);
         sat_predicted = 0;
       }
       sat.site(GPS.latitudeDegrees, GPS.longitudeDegrees, GPS.altitude);
     }
-    if(second() == 0) term.printf(PSTR("AOS in: %lf, LOS in: %lf minutes.\n"), (aos - rtc_jdt) * 1440, (los - rtc_jdt) * 1440);
     if(los < rtc_jdt && sat_predicted == 1) sat_predicted = 0;   // check for LOS and run new predict
     if(sat_predicted == 0) findPass();
     rtc_jdt -= (double) 10 / 86400;   // calculate speed over positions separated by 10s
@@ -422,57 +423,23 @@ void loop() {   // non blocking loop, no delays or blocking calls
     sat_speed = (dist_old - sat.satDist) / 10;
     uplink_doppler = uplink - sat_speed / 29979 * uplink / 10;  // deciherz
     downlink_doppler = downlink + sat_speed / 29979 * downlink / 10;
-    if(second() == 0) term.printf(PSTR("Sat %s: Az %.0lf, El %.0lf, Speed %.2lf km/s\n"), sat.satName, sat.satAz, sat.satEl, sat_speed);
-    if(disp_mode==1 || disp_mode==2) updateDisplay();  // disp mode 0 is triggered from the radio response
   }
 
   if(term.available()){     // USB serial as manager, taking single byte commands for simplicity
     char c = term.read();
-    if(c=='1'){   // show radio
-      disp_mode=0;
-    }else if(c=='2'){   // show satellite
-      disp_mode=1;
-    }else if(c=='3'){   // show time
-      disp_mode=2;
-
-    }else if(c=='r'){
-      term.println("read_rxs 1");
-      r1.write(read_rxs, sizeof(read_rxs));
-      r1_time = millis();
-      r1_req=1;
-    }else if(c=='t'){
-      term.println("read_txs 1");
-      r1.write(read_txs, sizeof(read_txs));
-      r1_time = millis();
-      r1_req=1;
-
-    }else if(c=='9'){   // start polling
+    if(c=='1'){   // start polling
       poll_time = millis();
     }else if(c=='0'){   // stop polling
       poll_time = 0;
 
     }else if(c=='l'){ // lock vfo's
-      poll_interval = intervals[1];
-      r1_lock = 1;    // master
-      r2_lock = 0;    // slave
-    }else if(c=='L'){ // lock vfo's
-      poll_interval = intervals[1];
-      r1_lock = 0;    // slave
-      r2_lock = 1;    // master
+      rig_mode = RIG_MAN;
     }else if(c=='u'){ // unlock vfo's
-      poll_interval = intervals[0];
-      poll_time = millis();
-      r1_lock = 0;    // independent
-      r2_lock = 0;
+      rig_mode = RIG_FREE;
     }else if(c=='d'){ // doppler soft controlled, for linears
-      poll_interval = intervals[0];
-      poll_time = millis();
-      r1_lock = 3;
-      r2_lock = 3;
+      rig_mode = RIG_LIN;
     }else if(c=='D'){ // doppler forced, for fm
-      poll_time = 0;
-      r1_lock = 4;
-      r2_lock = 4;
+      rig_mode = RIG_FORCE;
 
     }else if(c=='n'){ // next satellite from conf
       sat_ptr++;
@@ -483,8 +450,12 @@ void loop() {   // non blocking loop, no delays or blocking calls
       else sat_ptr--;
       loadSat();
 
+    }else if(c=='s'){
+      term.printf(PSTR("Sat %s: Az %.0lf, El %.0lf, Speed %.2lf km/s\n"), sat.satName, sat.satAz, sat.satEl, sat_speed);
+      term.printf(PSTR("AOS in: %lf, LOS in: %lf minutes.\n"), (aos - rtc_jdt) * 1440, (los - rtc_jdt) * 1440);
+
     }else if(c=='g'){ // show gps
-      term.printf(PSTR("Time: %2d:%2d:%2d\n"), GPS.hour, GPS.minute, GPS.seconds);
+      term.printf(PSTR("Time: %2d:%2d:%2d, "), GPS.hour, GPS.minute, GPS.seconds);
       term.printf(PSTR("Latitude: %.3f, Longitude: %.3f\n"), GPS.latitudeDegrees, GPS.longitudeDegrees);
 
     }else if(c=='T'){ // temporarily enter timesync mode, 100ms blocking!
@@ -499,14 +470,12 @@ void loop() {   // non blocking loop, no delays or blocking calls
       r1_freq = from_bcd_be(r1_read);                   // convert bcd array to long
     }
     r1_req=0;                                           // clear request length
-    if(disp_mode==0) updateDisplay();
   }else if((r1_req == 0 || r1_req > 9) && r1.available()){              // flush unrequested data
     r1.read();
   }
   if(r1_req > 0 && millis() > r1_time + timeout){       // request timeout
     r1_freq = 1;
     r1_req = 255;
-    if(disp_mode==0) updateDisplay();
   }
 
   // parse responses from radio 2
@@ -516,45 +485,42 @@ void loop() {   // non blocking loop, no delays or blocking calls
       r2_freq = from_bcd_be(r2_read);                   // convert bcd array to long
     }
     r2_req=0;                                           // clear request length
-    if(disp_mode==0) updateDisplay();
   }else if((r2_req == 0 || r2_req > 9) && r2.available()){              // flush unrequested
     r2.read();
   }
   if(r2_req > 0 && millis() > r2_time + timeout){       // request timeout
     r2_freq = 1;
     r2_req = 255;
-    if(disp_mode==0) updateDisplay();
   }
 
-  // locked vfo with r1 as master
-  if(r1_lock == 1){
-    r1_lockfreq = r1_oldfreq = r1_freq;   // store the locked frequencies
-    r2_lockfreq = r2_freq;
-    r1_lock = 2;
-    r2_lock = 0;
-    vfo_factor = (float) r2_freq / r1_freq;
-    term.println("Locking with radio 1 master");
-    term.print("vfo_factor: ");
-    term.println(vfo_factor);
-  }else if(r1_lock == 2){
-    if(r1_freq != r1_oldfreq){
-      r2_freq = r2_lockfreq - vfo_factor * (r1_freq - r1_lockfreq);
-      r1_oldfreq = r1_freq;
-      term.print("r1_freq: ");
-      term.println(r1_freq);
-      term.print("r2_freq: ");
-      term.println(r2_freq);
-      to_bcd_be(write_freq, r2_freq, 8);
-      r2.write(write_freq, sizeof(write_freq));
-      if(disp_mode==0) updateDisplay();
-    }
-  }else if(r1_lock == 3){ // doppler controlled
-    //r1_freq = downlink + sat_speed / 29979 * uplink
-    //to_bcd_be(write_freq, r1_freq, 8);
-    //r1.write(write_freq, sizeof(write_freq));
-    //to_bcd_be(write_freq, r2_freq, 8);
-    //r2.write(write_freq, sizeof(write_freq));
+  if(rig_mode==RIG_FREE){         // free running, only read frequencies
+    switch (rig_state){
+    case 0:
+      if(millis() - poll_time >= poll_intervals[0]){
+        poll_time = r1_time = r2_time = millis();
+        r1.write(read_freq, sizeof(read_freq));
+        r1_req=5;
+        r2.write(read_freq, sizeof(read_freq));
+        r2_req=5;
+        rig_state++;
+      }
+      break;
+    case 1:
+      if(r1_req == 0 && r2_req == 0){ // read done
+        rig_state++;
+      }else if(r1_req > 9 || r2_req > 9){           // timeout
+        rig_state = 0; 
+      }
+      break;
 
+    default:
+      updateDisplay();
+      rig_state = 0;
+      break;
+    }
+  //}else if(rig_mode==RIG_MAN){    // lock vfos together and keep them synced
+  //}else if(rig_mode==RIG_FORCE){  // force doppler frequency from sat calculations, for FM sat
+  }else if(rig_mode==RIG_LIN){    // for linear sat
     /*
       State machine for both radios:
       read rxs or txs from both
@@ -564,24 +530,24 @@ void loop() {   // non blocking loop, no delays or blocking calls
       if in transmit, the freq command has no effect, so no need to send it
       calculate new doppler and send it to the radios
     */
-    switch (r_state){
+    switch (rig_state){
     case 0:
-      if(millis() - poll_time >= poll_interval){
+      if(millis() - poll_time >= poll_intervals[0]){
         poll_time = r1_time = r2_time = millis();
         r1.write(read_rxs, sizeof(read_rxs));
         r1_req=1;
         r2.write(read_rxs, sizeof(read_rxs));
         r2_req=1;
-        r_state++;
-        term.println(F("Polling rxs."));
+        rig_state++;
+        term.print(F("Polling rxs"));
       }
       break;
 
     case 1:
       if(r1_req == 0 && r2_req == 0){ // read done
-        r_state++;
+        rig_state++;
       }else if(r1_req > 9){           // timeout
-        r_state = 0;
+        rig_state=255;
       }
       break;
 
@@ -591,76 +557,24 @@ void loop() {   // non blocking loop, no delays or blocking calls
       r1_req=5;
       r2.write(read_freq, sizeof(read_freq));
       r2_req=5;
-      r_state++;
-      term.println(F("Polling freq."));
+      rig_state++;
+      term.print(F(", freq"));
       break;
 
     case 3:
       if(r1_req == 0 && r2_req == 0){ // read done
-        r_state++;
+        rig_state++;
       }else if(r1_req > 9){           // timeout
-        r_state = 0;
+        rig_state = 255;
       }
 
     default:
-      r_state = 0;
+      term.println();
+      updateDisplay();
+      rig_state = 0;
       break;
     }
-  }else if(r1_lock == 4){ // doppler forced
-    if(millis() - poll_time >= poll_interval){
-      //poll_time = millis(); // handled below
-      r1_freq = downlink + sat_speed / 29979 * downlink / 10;
-      to_bcd_be(write_freq, r1_freq, 8);
-      r1.write(write_freq, sizeof(write_freq));
-      //term.println(r1_freq);
-    }
   }else{
-    r1_lock = 0;
-  }
-
-  if(r2_lock == 1){
-    r2_lockfreq = r2_oldfreq = r2_freq;   // store the locked frequencies
-    r1_lockfreq = r1_freq;
-    r2_lock = 2;
-    r1_lock = 0;
-    vfo_factor = (float) r1_freq / r2_freq;
-    term.println("Locking with radio 2 master");
-    term.print("vfo_factor: ");
-    term.println(vfo_factor);
-  }else if(r2_lock == 2){
-    if(r2_freq != r2_oldfreq){
-      r1_freq = r1_lockfreq - vfo_factor * (r2_freq - r2_lockfreq);
-      r2_oldfreq = r2_freq;
-      term.print("r1_freq: ");
-      term.println(r1_freq);
-      term.print("r2_freq: ");
-      term.println(r2_freq);
-      to_bcd_be(write_freq, r1_freq, 8);
-      r2.write(write_freq, sizeof(write_freq));
-      if(disp_mode==0) updateDisplay();
-    }
-  }else if(r2_lock == 3){
-    // handled in r1 above
-  }else if(r2_lock == 4){ // doppler forced
-    if(millis() - poll_time >= poll_interval){
-      poll_time = millis();
-      r2_freq = uplink - sat_speed / 29979 * uplink / 10;
-      to_bcd_be(write_freq, r2_freq, 8);
-      r2.write(write_freq, sizeof(write_freq));
-      //term.println(r2_freq);
-    }
-  }else{
-    r2_lock = 0;
-  }
-
-  // auto polling of radios
-  if(poll_time != 0 && millis() - poll_time >= poll_interval){
-    poll_time = r1_time = r2_time = millis();
-    //term.println("polling radios");
-    r1.write(read_freq, sizeof(read_freq));             // TODO: reduce poll interval when timed out, hard to turn on/off radio otherwise
-    r1_req=5;
-    r2.write(read_freq, sizeof(read_freq));
-    r2_req=5;
+    rig_mode=RIG_FREE;
   }
 }
-
