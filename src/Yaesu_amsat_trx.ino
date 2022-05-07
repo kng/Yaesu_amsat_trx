@@ -77,7 +77,7 @@ byte r1_req, r2_req;            // RX bytes requested
 long r1_freq, r1_oldfreq, r1_lockfreq, r2_freq, r2_oldfreq, r2_lockfreq;
 byte rig_state;  // rig state machine
 unsigned long r1_time, r2_time, poll_time, sat_time, disp_time;   // millis on last command, last poll
-unsigned int poll_intervals[2] = {1000,250};    // [0] slow, [1] fast polling interval
+unsigned int poll_intervals[2] = {1000,100};    // [0] slow, [1] fast polling interval
 unsigned int timeout = 100;  // in ms
 float vfo_factor;   // factor between the vfo's at locking
 double gps_jdt, rtc_jdt, aos, los, dist_old, sat_speed; // julian date, old sat distance
@@ -404,10 +404,10 @@ void loop() {   // non blocking loop, no delays or blocking calls
     if(GPS.fix && GPS.secondsSinceTime() < 3.0 && millis() > 5000){
       jday((int)2000 + GPS.year, GPS.month, GPS.day, GPS.hour, GPS.minute, GPS.seconds, 0, false, gps_jdt);
       if(rtc_jdt > gps_jdt + 0.00005 || rtc_jdt < gps_jdt - 0.00005){  // ~4s tolerance for setting rtc
-        term.print(F("Setting system time from gps."));
-        term.printf(PSTR(" Old: %02d:%02d:%02d"), hour(), minute(), second());
+        term.print(F("Setting system time from gps.\n"));
+        //term.printf(PSTR(" Old: %02d:%02d:%02d"), hour(), minute(), second());
         setTime(GPS.hour, GPS.minute, GPS.seconds, GPS.day, GPS.month, GPS.year);
-        term.printf(PSTR(", New: %02d:%02d:%02d\n"), hour(), minute(), second());
+        //term.printf(PSTR(", New: %02d:%02d:%02d\n"), hour(), minute(), second());
         jday(year(), month(), day(), hour(), minute(), second(), 0, false, rtc_jdt);
         sat_predicted = 0;
       }
@@ -431,6 +431,8 @@ void loop() {   // non blocking loop, no delays or blocking calls
       poll_time = millis();
     }else if(c=='0'){   // stop polling
       poll_time = 0;
+    }else if(c=='q'){   // clear display
+      disp_mode = 255;
 
     }else if(c=='l'){ // lock vfo's
       rig_mode = RIG_MAN;
@@ -459,7 +461,7 @@ void loop() {   // non blocking loop, no delays or blocking calls
       term.printf(PSTR("AOS in: %lf, LOS in: %lf minutes.\n"), (aos - rtc_jdt) * 1440, (los - rtc_jdt) * 1440);
 
     }else if(c=='g'){ // show gps
-      term.printf(PSTR("Time: %2d:%2d:%2d, "), GPS.hour, GPS.minute, GPS.seconds);
+      term.printf(PSTR("Time: %02d:%02d:%02d, "), GPS.hour, GPS.minute, GPS.seconds);
       term.printf(PSTR("Latitude: %.3f, Longitude: %.3f\n"), GPS.latitudeDegrees, GPS.longitudeDegrees);
 
     }else if(c=='T'){ // temporarily enter timesync mode, 100ms blocking!
@@ -499,32 +501,117 @@ void loop() {   // non blocking loop, no delays or blocking calls
 
   if(rig_mode==RIG_FREE){         // free running, only read frequencies
     switch (rig_state){
-    case 0:
-      if(millis() - poll_time >= poll_intervals[0]){
+      case 0:
+        if(millis() - poll_time >= poll_intervals[0]){
+          r1_time = r2_time = millis();
+          r1.write(read_freq, sizeof(read_freq));
+          r1_req=5;
+          r2.write(read_freq, sizeof(read_freq));
+          r2_req=5;
+          rig_state++;
+        }
+        break;
+      case 1:
+        if(r1_req == 0 && r2_req == 0){ // read done
+          rig_state++;
+        }else if(r1_req > 9 || r2_req > 9){           // timeout
+          rig_state = 255;
+        }
+        break;
+
+      default:
+        updateDisplay();
+        poll_time = millis();
+        rig_state = 0;
+        break;
+    }
+
+  }else if(rig_mode==RIG_MAN){    // lock vfos together and keep them synced
+    switch(rig_state){
+      case 0: // read vfo
         r1_time = r2_time = millis();
         r1.write(read_freq, sizeof(read_freq));
         r1_req=5;
         r2.write(read_freq, sizeof(read_freq));
         r2_req=5;
-        rig_state++;
-      }
-      break;
-    case 1:
-      if(r1_req == 0 && r2_req == 0){ // read done
-        rig_state++;
-      }else if(r1_req > 9 || r2_req > 9){           // timeout
-        rig_state = 255;
-      }
-      break;
+        rig_state++; 
+        break;
 
-    default:
-      updateDisplay();
-      poll_time = millis();
-      rig_state = 0;
-      break;
+      case 1: // wait for frequency
+        if(r1_req == 0 && r2_req == 0){ // read done
+          r1_lockfreq = r1_oldfreq = r1_freq;
+          r2_lockfreq = r2_oldfreq = r2_freq;
+          vfo_factor = (float) r2_freq / r1_freq;
+          term.printf(PSTR("Entering RIG_MAN, R1: %ld, R2: %ld, VFO factor: %f\n"), r1_freq, r2_freq, vfo_factor);
+          rig_state++;
+        }else if(r1_req > 9 || r2_req > 9){           // timeout
+          rig_state = 255;
+          rig_mode = RIG_FREE;    // bail out
+          term.println(F("Timeout from radio, exiting RIG_MAN."));
+        }
+        break;
+
+      case 2: // read vfo
+        if(millis() - poll_time >= poll_intervals[1]){
+          r1_time = r2_time = millis();
+          r1.write(read_freq, sizeof(read_freq));
+          r1_req=5;
+          r2.write(read_freq, sizeof(read_freq));
+          r2_req=5;
+          rig_state++; 
+        }
+        break;
+
+      case 3: // calc new frequency and send
+        if(r1_req == 0 && r2_req == 0){ // read done
+          // TODO: check rxs ?
+          if(r1_freq != r1_oldfreq){
+            r1_oldfreq = r1_freq;
+            r2_freq = r2_oldfreq = r2_lockfreq - vfo_factor * (r1_freq - r1_lockfreq);
+            term.printf(PSTR("R1 changed, new R2: %ld\n"), r2_freq);
+            to_bcd_be(write_freq, r2_freq, 8);
+            r2.write(write_freq, sizeof(write_freq));
+          }else if(r2_freq != r2_oldfreq){
+            r2_oldfreq = r2_freq;
+            r1_freq = r1_oldfreq = r1_lockfreq - vfo_factor * (r2_freq - r2_lockfreq);
+            term.printf(PSTR("R2 changed, new R1: %ld\n"), r1_freq);
+            to_bcd_be(write_freq, r1_freq, 8);
+            r1.write(write_freq, sizeof(write_freq));
+          }
+          rig_state++;
+        }else if(r1_req > 9 || r2_req > 9){           // timeout
+          rig_state = 255;
+        }
+        break;
+
+      default:
+        updateDisplay();
+        poll_time = millis();
+        rig_state = 2;
+        break;
     }
-  //}else if(rig_mode==RIG_MAN){    // lock vfos together and keep them synced
-  //}else if(rig_mode==RIG_FORCE){  // force doppler frequency from sat calculations, for FM sat
+
+  }else if(rig_mode==RIG_FORCE){  // force doppler frequency from sat calculations, for FM sat
+    switch (rig_state){
+      case 0:
+        if(millis() - poll_time >= poll_intervals[0]){
+          r1_freq = downlink_doppler;
+          r2_freq = uplink_doppler;
+          to_bcd_be(write_freq, r1_freq, 8);
+          r1.write(write_freq, sizeof(write_freq));
+          to_bcd_be(write_freq, r2_freq, 8);
+          r2.write(write_freq, sizeof(write_freq));
+          rig_state++;
+        }
+        break;
+
+      default:
+        updateDisplay();
+        poll_time = millis();
+        rig_state = 0;
+        break;
+    }
+
   }else if(rig_mode==RIG_LIN){    // for linear sat
     /*
       State machine for both radios:
@@ -536,50 +623,50 @@ void loop() {   // non blocking loop, no delays or blocking calls
       calculate new doppler and send it to the radios
     */
     switch (rig_state){
-    case 0:
-      if(millis() - poll_time >= poll_intervals[0]){
+      case 0:
+        if(millis() - poll_time >= poll_intervals[0]){
+          r1_time = r2_time = millis();
+          r1.write(read_rxs, sizeof(read_rxs));
+          r1_req=1;
+          r2.write(read_rxs, sizeof(read_rxs));
+          r2_req=1;
+          rig_state++;
+          term.print(F("Polling rxs"));
+        }
+        break;
+
+      case 1:
+        if(r1_req == 0 && r2_req == 0){ // read done
+          rig_state++;
+        }else if(r1_req > 9 || r2_req > 9){           // timeout
+          rig_state++;
+        }
+        break;
+
+      case 2:
         r1_time = r2_time = millis();
-        r1.write(read_rxs, sizeof(read_rxs));
-        r1_req=1;
-        r2.write(read_rxs, sizeof(read_rxs));
-        r2_req=1;
+        r1.write(read_freq, sizeof(read_freq));
+        r1_req=5;
+        r2.write(read_freq, sizeof(read_freq));
+        r2_req=5;
         rig_state++;
-        term.print(F("Polling rxs"));
-      }
-      break;
+        term.print(F(", freq"));
+        break;
 
-    case 1:
-      if(r1_req == 0 && r2_req == 0){ // read done
-        rig_state++;
-      }else if(r1_req > 9 || r2_req > 9){           // timeout
-        rig_state++;
-      }
-      break;
+      case 3:
+        if(r1_req == 0 && r2_req == 0){ // read done
+          rig_state++;
+        }else if(r1_req > 9 || r2_req > 9){           // timeout
+          rig_state = 255;
+        }
+        break;
 
-    case 2:
-      r1_time = r2_time = millis();
-      r1.write(read_freq, sizeof(read_freq));
-      r1_req=5;
-      r2.write(read_freq, sizeof(read_freq));
-      r2_req=5;
-      rig_state++;
-      term.print(F(", freq"));
-      break;
-
-    case 3:
-      if(r1_req == 0 && r2_req == 0){ // read done
-        rig_state++;
-      }else if(r1_req > 9 || r2_req > 9){           // timeout
-        rig_state = 255;
-      }
-      break;
-
-    default:
-      term.println();
-      updateDisplay();
-      poll_time = millis();
-      rig_state = 0;
-      break;
+      default:
+        term.println();
+        updateDisplay();
+        poll_time = millis();
+        rig_state = 0;
+        break;
     }
   }else{
     rig_mode=RIG_FREE;
