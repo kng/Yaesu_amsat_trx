@@ -30,7 +30,7 @@
 #define ENC_SEL  6
 #define ENC_A    9
 #define ENC_B    10
-//#define ENCODER_USE_INTERRUPTS
+#define ENCODER_USE_INTERRUPTS
 #define BOUNCE_WITH_PROMPT_DETECTION
 
 #define NUM_SAT_CONF    16    // max number of satellites read from config
@@ -139,6 +139,20 @@ radio_modes str2mode(char *str, size_t sze){
   return MODE_UNK;
 }
 
+char *maidenhead(double lat, double lon){
+  static char mh[10];
+  unsigned int lati = round(lat * 100000.0 + 9000000.0);
+  unsigned int loni = round(lon * 100000.0 + 18000000.0);
+  mh[0] = 'A' + (char)(loni / 2000000);
+  mh[1] = 'A' + (char)(lati / 1000000);
+  mh[2] = '0' + (char)((loni % 2000000) / 200000);
+  mh[3] = '0' + (char)((lati % 1000000) / 100000);
+  mh[4] = 'a' + (char)((loni %  200000) /   8333);
+  mh[5] = 'a' + (char)((lati %  100000) /   4166);
+  mh[6] = 0; // asciiz
+  return mh;
+}
+
 void updateDisplay(){
   if(millis() - disp_time < 200) return;  // rate limiting
   disp_time = millis();
@@ -186,11 +200,9 @@ void updateDisplay(){
       tft.print(F("AOS in:  > 1 day\nLOS in:  > 1 day\n"));
     }
     tft.printf(PSTR("GPS lock:  %d (s:%2d)\n"), GPS.fixquality, GPS.satellites);
-    tft.printf(PSTR("Latitude:  %lf\n"), GPS.latitudeDegrees);
-    tft.printf(PSTR("Longitude: %lf\n"), GPS.longitudeDegrees);
-    char mh[7];
-    maidenhead(mh, GPS.latitudeDegrees, GPS.longitudeDegrees);
-    tft.printf(PSTR("Locator:   %s\n"), mh);
+    tft.printf(PSTR("Latitude:  %8.4lf\n"), GPS.latitudeDegrees);
+    tft.printf(PSTR("Longitude: %08.4lf\n"), GPS.longitudeDegrees);
+    //tft.printf(PSTR("Locator:   %.6s\n"), maidenhead(GPS.latitudeDegrees, GPS.longitudeDegrees));  // BOOGS! crashes after a while
 
   }else{
     disp_mode=0;
@@ -331,18 +343,6 @@ void readTLE(int noradID){
   sat.init(row1, row2, row3);     //initialize satellite parameters
   //term.printf(PSTR("satname: %s\ntle1: %s\ntle2: %s\n"), satname, tle_line1, tle_line2);
   term.printf(PSTR("Sat init: %s\n"), sat.satName);
-}
-
-void maidenhead(char mh[7], double lat, double lon){
-  unsigned int lati = lat * 100000 + 9000000;
-  unsigned int loni = lon * 100000 + 18000000;
-  mh[0] = 'A' + loni / 2000000;
-  mh[1] = 'A' + lati / 1000000;
-  mh[2] = '0' + (loni % 2000000) / 200000;
-  mh[3] = '0' + (lati % 1000000) / 100000;
-  mh[4] = 'a' + (loni %  200000) /   8333;
-  mh[5] = 'a' + (lati %  100000) /   4166;
-  mh[6] = 0; // asciiz
 }
 
 void setup() {
