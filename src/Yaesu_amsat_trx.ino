@@ -74,14 +74,15 @@ char read_txs[5] = {0,0,0,0,0xF7};    // read transmitter status
 
 char r1_read[10], r2_read[10];  // RX buffer from radio
 byte r1_req, r2_req;            // RX bytes requested
-long r1_freq, r1_oldfreq, r1_lockfreq, r2_freq, r2_oldfreq, r2_lockfreq;
+long r1_freq, r1_oldfreq, r1_offset, r1_lockfreq, r2_freq, r2_oldfreq, r2_offset, r2_lockfreq;
+bool r1_ptt, r2_ptt;
 byte rig_state;  // rig state machine
 unsigned long r1_time, r2_time, poll_time, sat_time, disp_time;   // millis on last command, last poll
 unsigned int poll_intervals[2] = {1000,100};    // [0] slow, [1] fast polling interval
 unsigned int timeout = 100;  // in ms
 float vfo_factor;   // factor between the vfo's at locking
 double gps_jdt, rtc_jdt, aos, los, dist_old, sat_speed; // julian date, old sat distance
-byte gps_oldsecond, gps_nmea, disp_mode, disp_oldmode = 255, sat_predicted = 255;
+byte disp_mode, disp_oldmode = 255, sat_predicted = 255;
 int oldsecond;
 long downlink, uplink, downlink_doppler, uplink_doppler; // deciherz, same as frequency resolution
 unsigned long norad;  // norad ID
@@ -617,13 +618,26 @@ void loop() {   // non blocking loop, no delays or blocking calls
       State machine for both radios:
       read rxs or txs from both
       read freq from both
-      if rx freq has changed, add this to both
+      if rx freq has changed, add this to both?
       if not in transmit, tx freq has changed, add this to tx
       if in transmit, the freq command has no effect, so no need to send it
       calculate new doppler and send it to the radios
     */
     switch (rig_state){
-      case 0:
+      case 0:   // send starting frequencies
+        term.print(F("Initializing radios in RIG_LIN.\n"));
+        r1_freq = r1_oldfreq = downlink_doppler;    // allow selection of up-/downlink radio, depending on band or fixed TX
+        r2_freq = r2_oldfreq = uplink_doppler;
+        r1_offset = r2_offset = 0;
+        to_bcd_be(write_freq, r1_freq, 8);
+        r1.write(write_freq, sizeof(write_freq));
+        to_bcd_be(write_freq, r2_freq, 8);
+        r2.write(write_freq, sizeof(write_freq));
+        rig_state++;
+        poll_time = millis();
+        break;
+
+      case 1:
         if(millis() - poll_time >= poll_intervals[0]){
           r1_time = r2_time = millis();
           r1.write(read_rxs, sizeof(read_rxs));
@@ -631,30 +645,48 @@ void loop() {   // non blocking loop, no delays or blocking calls
           r2.write(read_rxs, sizeof(read_rxs));
           r2_req=1;
           rig_state++;
-          term.print(F("Polling rxs"));
         }
         break;
 
-      case 1:
+      case 2:
         if(r1_req == 0 && r2_req == 0){ // read done
+          r1_ptt = r1_read[0]==0xff;
+          r2_ptt = r2_read[0]==0xff;
+          term.printf(PSTR("R1 PTT: %d, R2 PTT: %d.\n"), r1_ptt, r2_ptt);
           rig_state++;
         }else if(r1_req > 9 || r2_req > 9){           // timeout
           rig_state++;
         }
         break;
 
-      case 2:
+      case 3:
         r1_time = r2_time = millis();
         r1.write(read_freq, sizeof(read_freq));
         r1_req=5;
         r2.write(read_freq, sizeof(read_freq));
         r2_req=5;
         rig_state++;
-        term.print(F(", freq"));
         break;
 
-      case 3:
+      case 4:
         if(r1_req == 0 && r2_req == 0){ // read done
+          r1_offset += r1_freq - r1_oldfreq;
+          r2_offset += r2_freq - r2_oldfreq;
+          if(!r1_ptt){
+            r1_freq = r1_oldfreq = downlink_doppler + r1_offset;
+            to_bcd_be(write_freq, r1_freq, 8);
+            r1.write(write_freq, sizeof(write_freq));
+          }else{
+            r1_oldfreq = r1_freq;
+          }
+          if(!r2_ptt){
+            r2_freq = r2_oldfreq = uplink_doppler + r2_offset;
+            to_bcd_be(write_freq, r2_freq, 8);
+            r2.write(write_freq, sizeof(write_freq));
+          }else{
+            r2_oldfreq = r2_freq;
+          }
+          term.printf(PSTR("R1 offset: %li, R2 offset: %li\n\n"), r1_offset, r2_offset);
           rig_state++;
         }else if(r1_req > 9 || r2_req > 9){           // timeout
           rig_state = 255;
@@ -662,10 +694,9 @@ void loop() {   // non blocking loop, no delays or blocking calls
         break;
 
       default:
-        term.println();
         updateDisplay();
         poll_time = millis();
-        rig_state = 0;
+        rig_state = 1;    // be sure to skip the init at step 0 when looping
         break;
     }
   }else{
