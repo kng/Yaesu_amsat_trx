@@ -179,14 +179,8 @@ void updateDisplay(){
 
   }else if(disp_mode==1){   // Display satellite and doppler info
     tft.setCursor(0,0);
-    tft.setTextSize(1);
-    tft.printf(PSTR("Sat: %s\n"), sat.satName);
-    tft.printf(PSTR("Az: %.1lf\nEl: %.1lf\nSpeed: %.2lf km/s\n\n"), sat.satAz, sat.satEl, sat_speed);
-    //tft.setCursor(0,40);
-    tft.printf(PSTR("UL: %9li %5.0lf\n"), uplink*10, (double)-sat_speed / 29979 * uplink);
-    tft.printf(PSTR("UD: %9li\n\n"), uplink_doppler*10);
-    tft.printf(PSTR("DL: %9li %5.0lf\n"), downlink*10, (double)sat_speed / 29979 * downlink);
-    tft.printf(PSTR("DD: %9li\n"), downlink_doppler*10);
+    tft.setTextSize(2);
+    tft.printf(PSTR("%.10s\nAz: %5.1lf\nEl: %5.1lf\nSpd: %3.2lf\n\n"), sat.satName, sat.satAz, sat.satEl, sat_speed);
 
   }else if(disp_mode==2){   // Display system info
     tft.setCursor(0,0);
@@ -204,6 +198,8 @@ void updateDisplay(){
     tft.printf(PSTR("Latitude:  %8.4lf\n"), GPS.latitudeDegrees);
     tft.printf(PSTR("Longitude: %08.4lf\n"), GPS.longitudeDegrees);
     //tft.printf(PSTR("Locator:   %.6s\n"), maidenhead(GPS.latitudeDegrees, GPS.longitudeDegrees));  // BOOGS! crashes after a while
+    //tft.print(F("Locator:   "));
+    //tft.print(maidenhead(GPS.latitudeDegrees, GPS.longitudeDegrees)); // still BOOGS!
 
   }else{
     disp_mode=0;
@@ -669,9 +665,12 @@ void loop() {   // non blocking loop, no delays or blocking calls
         break;
 
       case 4:
+        static long r1_change, r2_change;
         if(r1_req == 0 && r2_req == 0){ // read done
-          r1_offset += r1_freq - r1_oldfreq;
-          r2_offset += r2_freq - r2_oldfreq;
+          r1_change = r1_freq - r1_oldfreq;
+          r2_change = r2_freq - r2_oldfreq;
+          r1_offset += r1_change - r2_change; // TX also tunes RX. TODO: add support for inv/non-inv sat
+          r2_offset += r2_change;             // TODO: add support for changing if RX or TX tunes the other
           if(!r1_ptt){
             r1_freq = r1_oldfreq = downlink_doppler + r1_offset;
             to_bcd_be(write_freq, r1_freq, 8);
