@@ -180,24 +180,24 @@ void updateDisplay(){
   }else if(disp_mode==1){   // Display satellite and doppler info
     tft.setCursor(0,0);
     tft.setTextSize(2);
-    tft.printf(PSTR("%.10s\nAz: %5.1lf\nEl: %5.1lf\nSpd: %3.2lf\n\n"), sat.satName, sat.satAz, sat.satEl, sat_speed);
+    tft.printf(F("%.10s\nAz: %5.1lf\nEl: %5.1lf\nSpd: %3.2lf\n\n"), sat.satName, sat.satAz, sat.satEl, sat_speed);
 
   }else if(disp_mode==2){   // Display system info
     tft.setCursor(0,0);
     tft.setTextSize(1);
-    tft.printf(PSTR("Sys time:  %02d:%02d:%02d\n"), hour(), minute(), second());
-    tft.printf(PSTR("GPS time:  %02d:%02d:%02d\n"), GPS.hour, GPS.minute, GPS.seconds);
+    tft.printf(F("Sys time:  %02d:%02d:%02d\n"), hour(), minute(), second());
+    tft.printf(F("GPS time:  %02d:%02d:%02d\n"), GPS.hour, GPS.minute, GPS.seconds);
     double aost = aos - rtc_jdt, lost = los - rtc_jdt;
     if(aost < 1.0 && lost < 1.0){
-      tft.printf(PSTR("AOS in:    %02d:%02d:%02d\n"), int(aost * 24), int(aost * 1440) % 60, int(aost * 86400) % 60);   // TODO: handle negative numbers
-      tft.printf(PSTR("LOS in:    %02d:%02d:%02d\n"), int(lost * 24), int(lost * 1440) % 60, int(lost * 86400) % 60);
+      tft.printf(F("AOS in:    %02d:%02d:%02d\n"), int(aost * 24), int(aost * 1440) % 60, int(aost * 86400) % 60);   // TODO: handle negative numbers
+      tft.printf(F("LOS in:    %02d:%02d:%02d\n"), int(lost * 24), int(lost * 1440) % 60, int(lost * 86400) % 60);
     }else{
       tft.print(F("AOS in:  > 1 day\nLOS in:  > 1 day\n"));
     }
-    tft.printf(PSTR("GPS lock:  %d (s:%2d)\n"), GPS.fixquality, GPS.satellites);
-    tft.printf(PSTR("Latitude:  %8.4lf\n"), GPS.latitudeDegrees);
-    tft.printf(PSTR("Longitude: %08.4lf\n"), GPS.longitudeDegrees);
-    //tft.printf(PSTR("Locator:   %.6s\n"), maidenhead(GPS.latitudeDegrees, GPS.longitudeDegrees));  // BOOGS! crashes after a while
+    tft.printf(F("GPS lock:  %d (s:%2d)\n"), GPS.fixquality, GPS.satellites);
+    tft.printf(F("Latitude:  %8.4lf\n"), GPS.latitudeDegrees);
+    tft.printf(F("Longitude: %08.4lf\n"), GPS.longitudeDegrees);
+    //tft.printf(F("Locator:   %.6s\n"), maidenhead(GPS.latitudeDegrees, GPS.longitudeDegrees));  // BOOGS! crashes after a while
     //tft.print(F("Locator:   "));
     //tft.print(maidenhead(GPS.latitudeDegrees, GPS.longitudeDegrees)); // still BOOGS!
 
@@ -206,7 +206,7 @@ void updateDisplay(){
   }
   tft.setTextSize(0);
   tft.setCursor(SCREEN_WIDTH - 32, SCREEN_HEIGHT - 8);
-  tft.printf(PSTR("%1d %3d"), btn_mode % 10, (byte) enc_pos % 256);
+  tft.printf(F("%1d %3d"), btn_mode % 10, (byte) enc_pos % 256);
 }
 
 time_t getTeensy3Time()
@@ -275,7 +275,7 @@ void readConf(){
     uplink = 43514000;
   }else{
     loadSat();
-    term.printf(PSTR("Satellites loaded: %d\n"), sat_num);
+    term.printf(F("Satellites loaded: %d\n"), sat_num);
   }
 }
 
@@ -298,12 +298,12 @@ void findPass(void){
     los = overpass.jdstop;
     sat_predicted = 1;
     invjday(overpass.jdstart ,0 ,true , yr, mon, dy, hr, mn, sec);
-    term.printf(PSTR("Overpass %4d-%02d-%02d\n"), yr, mon, dy);
-    term.printf(PSTR("  Start: az=%3.0lf at %02d:%02d:%02.0lf\n"), overpass.azstart, hr, mn, sec);
+    term.printf(F("Overpass %4d-%02d-%02d\n"), yr, mon, dy);
+    term.printf(F("  Start: az=%3.0lf at %02d:%02d:%02.0lf\n"), overpass.azstart, hr, mn, sec);
     invjday(overpass.jdmax ,0 ,true , yr, mon, dy, hr, mn, sec);
-    term.printf(PSTR("  Max:   el=%2.0lf  at %02d:%02d:%02.0lf\n"), overpass.maxelevation, hr, mn, sec);
+    term.printf(F("  Max:   el=%2.0lf  at %02d:%02d:%02.0lf\n"), overpass.maxelevation, hr, mn, sec);
     invjday(overpass.jdstop ,0 ,true , yr, mon, dy, hr, mn, sec);
-    term.printf(PSTR("  Stop:  az=%3.0lf at %02d:%02d:%02.0lf\n"), overpass.azstop, hr, mn, sec);
+    term.printf(F("  Stop:  az=%3.0lf at %02d:%02d:%02.0lf\n"), overpass.azstop, hr, mn, sec);
   }
   if(sat_predicted != 1){
     term.print(F("Could not find satellite pass.\n"));
@@ -338,8 +338,8 @@ void readTLE(int noradID){
     strncpy_P(row3, PSTR("2 39444  97.6190  74.6247 0055298 265.9560  93.5332 14.83068053451003"), sizeof(row3));
   }
   sat.init(row1, row2, row3);     //initialize satellite parameters
-  //term.printf(PSTR("satname: %s\ntle1: %s\ntle2: %s\n"), satname, tle_line1, tle_line2);
-  term.printf(PSTR("Sat init: %s\n"), sat.satName);
+  //term.printf(F("satname: %s\ntle1: %s\ntle2: %s\n"), satname, tle_line1, tle_line2);
+  term.printf(F("Sat init: %s\n"), sat.satName);
 }
 
 void setup() {
@@ -402,9 +402,9 @@ void loop() {   // non blocking loop, no delays or blocking calls
       jday((int)2000 + GPS.year, GPS.month, GPS.day, GPS.hour, GPS.minute, GPS.seconds, 0, false, gps_jdt);
       if(rtc_jdt > gps_jdt + 0.00005 || rtc_jdt < gps_jdt - 0.00005){  // ~4s tolerance for setting rtc
         term.print(F("Setting system time from gps.\n"));
-        //term.printf(PSTR(" Old: %02d:%02d:%02d"), hour(), minute(), second());
+        //term.printf(F(" Old: %02d:%02d:%02d"), hour(), minute(), second());
         setTime(GPS.hour, GPS.minute, GPS.seconds, GPS.day, GPS.month, GPS.year);
-        //term.printf(PSTR(", New: %02d:%02d:%02d\n"), hour(), minute(), second());
+        //term.printf(F(", New: %02d:%02d:%02d\n"), hour(), minute(), second());
         jday(year(), month(), day(), hour(), minute(), second(), 0, false, rtc_jdt);
         sat_predicted = 0;
       }
@@ -454,12 +454,12 @@ void loop() {   // non blocking loop, no delays or blocking calls
       loadSat();
 
     }else if(c=='s'){
-      term.printf(PSTR("Sat %s: Az %.0lf, El %.0lf, Speed %.2lf km/s\n"), sat.satName, sat.satAz, sat.satEl, sat_speed);
-      term.printf(PSTR("AOS in: %lf, LOS in: %lf minutes.\n"), (aos - rtc_jdt) * 1440, (los - rtc_jdt) * 1440);
+      term.printf(F("Sat %s: Az %.0lf, El %.0lf, Speed %.2lf km/s\n"), sat.satName, sat.satAz, sat.satEl, sat_speed);
+      term.printf(F("AOS in: %lf, LOS in: %lf minutes.\n"), (aos - rtc_jdt) * 1440, (los - rtc_jdt) * 1440);
 
     }else if(c=='g'){ // show gps
-      term.printf(PSTR("Time: %02d:%02d:%02d, "), GPS.hour, GPS.minute, GPS.seconds);
-      term.printf(PSTR("Latitude: %.3f, Longitude: %.3f\n"), GPS.latitudeDegrees, GPS.longitudeDegrees);
+      term.printf(F("Time: %02d:%02d:%02d, "), GPS.hour, GPS.minute, GPS.seconds);
+      term.printf(F("Latitude: %.3f, Longitude: %.3f\n"), GPS.latitudeDegrees, GPS.longitudeDegrees);
 
     }else if(c=='T'){ // temporarily enter timesync mode, 100ms blocking!
       processSyncMessage();
@@ -539,7 +539,7 @@ void loop() {   // non blocking loop, no delays or blocking calls
           r1_lockfreq = r1_oldfreq = r1_freq;
           r2_lockfreq = r2_oldfreq = r2_freq;
           vfo_factor = (float) r2_freq / r1_freq;
-          term.printf(PSTR("Entering RIG_MAN, R1: %ld, R2: %ld, VFO factor: %f\n"), r1_freq, r2_freq, vfo_factor);
+          term.printf(F("Entering RIG_MAN, R1: %ld, R2: %ld, VFO factor: %f\n"), r1_freq, r2_freq, vfo_factor);
           rig_state++;
         }else if(r1_req > 9 || r2_req > 9){           // timeout
           rig_state = 255;
@@ -565,13 +565,13 @@ void loop() {   // non blocking loop, no delays or blocking calls
           if(r1_freq != r1_oldfreq){
             r1_oldfreq = r1_freq;
             r2_freq = r2_oldfreq = r2_lockfreq - vfo_factor * (r1_freq - r1_lockfreq);
-            term.printf(PSTR("R1 changed, new R2: %ld\n"), r2_freq);
+            term.printf(F("R1 changed, new R2: %ld\n"), r2_freq);
             to_bcd_be(write_freq, r2_freq, 8);
             r2.write(write_freq, sizeof(write_freq));
           }else if(r2_freq != r2_oldfreq){
             r2_oldfreq = r2_freq;
             r1_freq = r1_oldfreq = r1_lockfreq - vfo_factor * (r2_freq - r2_lockfreq);
-            term.printf(PSTR("R2 changed, new R1: %ld\n"), r1_freq);
+            term.printf(F("R2 changed, new R1: %ld\n"), r1_freq);
             to_bcd_be(write_freq, r1_freq, 8);
             r1.write(write_freq, sizeof(write_freq));
           }
@@ -648,7 +648,7 @@ void loop() {   // non blocking loop, no delays or blocking calls
         if(r1_req == 0 && r2_req == 0){ // read done
           r1_ptt = r1_read[0]==0xff;
           r2_ptt = r2_read[0]==0xff;
-          term.printf(PSTR("R1 PTT: %d, R2 PTT: %d.\n"), r1_ptt, r2_ptt);
+          term.printf(F("R1 PTT: %d, R2 PTT: %d.\n"), r1_ptt, r2_ptt);
           rig_state++;
         }else if(r1_req > 9 || r2_req > 9){           // timeout
           rig_state++;
@@ -685,7 +685,7 @@ void loop() {   // non blocking loop, no delays or blocking calls
           }else{
             r2_oldfreq = r2_freq;
           }
-          term.printf(PSTR("R1 offset: %li, R2 offset: %li\n\n"), r1_offset, r2_offset);
+          term.printf(F("R1 offset: %li, R2 offset: %li\n\n"), r1_offset, r2_offset);
           rig_state++;
         }else if(r1_req > 9 || r2_req > 9){           // timeout
           rig_state = 255;
