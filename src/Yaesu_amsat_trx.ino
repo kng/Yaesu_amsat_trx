@@ -94,7 +94,7 @@ typedef enum { RIG_FREE, RIG_LIN, RIG_FORCE, RIG_MAN } rig_modes;
 rig_modes rig_mode;
 
 typedef struct { // display name, norad, uplink_qrg, uplink_mode, downlink_qrg, downlink_mode
-  char name[16];
+  char name[25];
   unsigned long norad;
   unsigned long uplink_qrg;
   unsigned long downlink_qrg;
@@ -180,7 +180,13 @@ void updateDisplay(){
   }else if(disp_mode==1){   // Display satellite and doppler info
     tft.setCursor(0,0);
     tft.setTextSize(2);
-    tft.printf(F("%.10s\nAz: %5.1lf\nEl: %5.1lf\nSpd: %3.2lf\n\n"), sat.satName, sat.satAz, sat.satEl, sat_speed);
+    tft.printf(F("%.10s\nAz: %5.1lf\nEl: %5.1lf\nSpd: %3.2lf\n"), sat.satName, sat.satAz, sat.satEl, sat_speed);
+    double aost = aos - rtc_jdt, lost = los - rtc_jdt;
+    if(aos > rtc_jdt){
+      tft.printf(F("A %02d:%02d:%02d"), int(aost * 24), int(aost * 1440) % 60, int(aost * 86400) % 60);
+    }else{
+      tft.printf(F("L %02d:%02d:%02d"), int(lost * 24), int(lost * 1440) % 60, int(lost * 86400) % 60);
+    }
 
   }else if(disp_mode==2){   // Display system info
     tft.setCursor(0,0);
@@ -189,17 +195,19 @@ void updateDisplay(){
     tft.printf(F("GPS time:  %02d:%02d:%02d\n"), GPS.hour, GPS.minute, GPS.seconds);
     double aost = aos - rtc_jdt, lost = los - rtc_jdt;
     if(aost < 1.0 && lost < 1.0){
-      tft.printf(F("AOS in:    %02d:%02d:%02d\n"), int(aost * 24), int(aost * 1440) % 60, int(aost * 86400) % 60);   // TODO: handle negative numbers
+      if(aos < rtc_jdt){
+        tft.printf(F("AOS in:   -%02d:%02d:%02d\n"), abs(int(aost * 24)), abs(int(aost * 1440) % 60), abs(int(aost * 86400) % 60));
+      }else{
+        tft.printf(F("AOS in:    %02d:%02d:%02d\n"), int(aost * 24), int(aost * 1440) % 60, int(aost * 86400) % 60);
+      }
       tft.printf(F("LOS in:    %02d:%02d:%02d\n"), int(lost * 24), int(lost * 1440) % 60, int(lost * 86400) % 60);
     }else{
       tft.print(F("AOS in:  > 1 day\nLOS in:  > 1 day\n"));
     }
     tft.printf(F("GPS lock:  %d (s:%2d)\n"), GPS.fixquality, GPS.satellites);
-    tft.printf(F("Latitude:  %8.4lf\n"), GPS.latitudeDegrees);
-    tft.printf(F("Longitude: %08.4lf\n"), GPS.longitudeDegrees);
-    //tft.printf(F("Locator:   %.6s\n"), maidenhead(GPS.latitudeDegrees, GPS.longitudeDegrees));  // BOOGS! crashes after a while
-    //tft.print(F("Locator:   "));
-    //tft.print(maidenhead(GPS.latitudeDegrees, GPS.longitudeDegrees)); // still BOOGS!
+    //tft.printf(F("Latitude:  %8.4lf\n"), GPS.latitudeDegrees);
+    //tft.printf(F("Longitude: %08.4lf\n"), GPS.longitudeDegrees);
+    tft.printf(F("Locator:   %.6s\n"), maidenhead(GPS.latitudeDegrees, GPS.longitudeDegrees));
 
   }else{
     disp_mode=0;
@@ -609,16 +617,7 @@ void loop() {   // non blocking loop, no delays or blocking calls
         break;
     }
 
-  }else if(rig_mode==RIG_LIN){    // for linear sat
-    /*
-      State machine for both radios:
-      read rxs or txs from both
-      read freq from both
-      if rx freq has changed, add this to both?
-      if not in transmit, tx freq has changed, add this to tx
-      if in transmit, the freq command has no effect, so no need to send it
-      calculate new doppler and send it to the radios
-    */
+  }else if(rig_mode==RIG_LIN){    // doppler and vfo offset, for linear sat
     switch (rig_state){
       case 0:   // send starting frequencies
         term.print(F("Initializing radios in RIG_LIN.\n"));
