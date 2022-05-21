@@ -58,6 +58,7 @@
 Adafruit_SSD1351 tft = Adafruit_SSD1351(SCREEN_WIDTH, SCREEN_HEIGHT, &SPI, CS_PIN, DC_PIN, RST_PIN);
 SdFs sd;
 FsFile file;
+// Make sure to map the serialEvent functions below to match these!
 usb_serial_class& term = Serial;  // USB serial terminal
 HardwareSerial& r1 = Serial1;  // Radio 1: T4.0 RX 0, TX 1 / T3.2 RX 0, TX 1
 HardwareSerial& r2 = Serial2;  // Radio 2: T4.0 RX 7, TX 8 / T3.2 RX 9, TX 10
@@ -103,6 +104,23 @@ typedef struct { // display name, norad, uplink_qrg, uplink_mode, downlink_qrg, 
 } satellite_conf;
 satellite_conf satellites[NUM_SAT_CONF];
 byte sat_ptr = 0, sat_num = 0;
+
+// This need to match the serial ports defined above!
+void serialEvent() {
+  termEvent();
+}
+
+void serialEvent1() {
+  r1Event();
+}
+
+void serialEvent2() {
+  r2Event();
+}
+
+void serialEvent3() {
+  gpsEvent();
+}
 
 unsigned long from_bcd_be(char* c){
     unsigned long result(0);
@@ -215,6 +233,7 @@ void updateDisplay(){
   tft.setTextSize(0);
   tft.setCursor(SCREEN_WIDTH - 32, SCREEN_HEIGHT - 8);
   tft.printf(F("%1d %3d"), btn_mode % 10, (byte) enc_pos % 256);
+  //term.printf(F("updatedisplay() took %lu ms\n"), millis() - disp_time);
 }
 
 time_t getTeensy3Time()
@@ -381,12 +400,12 @@ void setup() {
 }
 
 void loop() {   // non blocking loop, no delays or blocking calls
-
+  bool needUpdateDisplay = false;
   btn.update();
   if(btn.fell()){
     btn_mode++;
     btn_mode%=2;
-    updateDisplay();
+    needUpdateDisplay=true;
   }
   enc_pos = myEnc.read() >> 2;  // divide down to mechanical steps if needed
   if(enc_pos != enc_old){
@@ -395,12 +414,7 @@ void loop() {   // non blocking loop, no delays or blocking calls
 
   if(btn_mode == 0){
     disp_mode = abs(enc_pos) % 3;
-    if(disp_mode != disp_oldmode) updateDisplay();
-  }
-
-  GPS.read();
-  if (GPS.newNMEAreceived()) {  // parse nmea
-    GPS.parse(GPS.lastNMEA());
+    if(disp_mode != disp_oldmode) needUpdateDisplay=true;
   }
 
   if(second() != oldsecond){    // use system RTC
@@ -428,80 +442,7 @@ void loop() {   // non blocking loop, no delays or blocking calls
     sat_speed = (dist_old - sat.satDist) / 10;
     uplink_doppler = uplink - sat_speed / 29979 * uplink / 10;  // deciherz
     downlink_doppler = downlink + sat_speed / 29979 * downlink / 10;
-  }
-
-  if(term.available()){     // USB serial as manager, taking single byte commands for simplicity
-    char c = term.read();
-    if(c=='1'){   // start polling
-      poll_time = millis();
-    }else if(c=='0'){   // stop polling
-      poll_time = 0;
-    }else if(c=='q'){   // clear display
-      disp_mode = 255;
-
-    }else if(c=='l'){ // lock vfo's
-      rig_mode = RIG_MAN;
-      rig_state = 0;
-    }else if(c=='u'){ // unlock vfo's
-      rig_mode = RIG_FREE;
-      rig_state = 0;
-    }else if(c=='d'){ // doppler soft controlled, for linears
-      rig_mode = RIG_LIN;
-      rig_state = 0;
-    }else if(c=='D'){ // doppler forced, for fm
-      rig_mode = RIG_FORCE;
-      rig_state = 0;
-
-    }else if(c=='n'){ // next satellite from conf
-      sat_ptr++;
-      if(sat_ptr >= sat_num) sat_ptr = 0;
-      loadSat();
-    }else if(c=='N'){ // previour satellite
-      if(sat_ptr == 0) sat_ptr = sat_num;
-      else sat_ptr--;
-      loadSat();
-
-    }else if(c=='s'){
-      term.printf(F("Sat %s: Az %.0lf, El %.0lf, Speed %.2lf km/s\n"), sat.satName, sat.satAz, sat.satEl, sat_speed);
-      term.printf(F("AOS in: %lf, LOS in: %lf minutes.\n"), (aos - rtc_jdt) * 1440, (los - rtc_jdt) * 1440);
-
-    }else if(c=='g'){ // show gps
-      term.printf(F("Time: %02d:%02d:%02d, "), GPS.hour, GPS.minute, GPS.seconds);
-      term.printf(F("Latitude: %.3f, Longitude: %.3f\n"), GPS.latitudeDegrees, GPS.longitudeDegrees);
-
-    }else if(c=='T'){ // temporarily enter timesync mode, 100ms blocking!
-      processSyncMessage();
-    }
-  }
-
-  // parse responses from radio 1
-  if(r1_req > 0 && r1_req < 10 && r1.available() == r1_req){           // does the response match the request ?
-    for(int i=0;i<r1_req;i++) r1_read[i] = r1.read();
-    if(r1_req == 5){                                    // frequency response
-      r1_freq = from_bcd_be(r1_read);                   // convert bcd array to long
-    }
-    r1_req=0;                                           // clear request length
-  }else if((r1_req == 0 || r1_req > 9) && r1.available()){              // flush unrequested data
-    r1.read();
-  }
-  if(r1_req > 0 && millis() > r1_time + timeout){       // request timeout
-    r1_freq = 1;
-    r1_req = 255;
-  }
-
-  // parse responses from radio 2
-  if(r2_req > 0 && r2_req < 10 && r2.available() == r2_req){           // does the response match the request ?
-    for(int i=0;i<r2_req;i++) r2_read[i] = r2.read();
-    if(r2_req == 5){                                    // frequency response
-      r2_freq = from_bcd_be(r2_read);                   // convert bcd array to long
-    }
-    r2_req=0;                                           // clear request length
-  }else if((r2_req == 0 || r2_req > 9) && r2.available()){              // flush unrequested
-    r2.read();
-  }
-  if(r2_req > 0 && millis() > r2_time + timeout){       // request timeout
-    r2_freq = 1;
-    r2_req = 255;
+    //needUpdateDisplay=true;
   }
 
   if(rig_mode==RIG_FREE){         // free running, only read frequencies
@@ -525,7 +466,7 @@ void loop() {   // non blocking loop, no delays or blocking calls
         break;
 
       default:
-        updateDisplay();
+        needUpdateDisplay=true;
         poll_time = millis();
         rig_state = 0;
         break;
@@ -590,7 +531,7 @@ void loop() {   // non blocking loop, no delays or blocking calls
         break;
 
       default:
-        updateDisplay();
+        needUpdateDisplay=true;
         poll_time = millis();
         rig_state = 2;
         break;
@@ -611,7 +552,7 @@ void loop() {   // non blocking loop, no delays or blocking calls
         break;
 
       default:
-        updateDisplay();
+        needUpdateDisplay=true;
         poll_time = millis();
         rig_state = 0;
         break;
@@ -692,12 +633,99 @@ void loop() {   // non blocking loop, no delays or blocking calls
         break;
 
       default:
-        updateDisplay();
+        needUpdateDisplay=true;
         poll_time = millis();
         rig_state = 1;    // be sure to skip the init at step 0 when looping
         break;
     }
   }else{
     rig_mode=RIG_FREE;
+  }
+  if(needUpdateDisplay) updateDisplay();
+}
+
+void termEvent() {
+  //if(term.available()){     // USB serial as manager, taking single byte commands for simplicity
+  char c = term.read();
+  if(c=='1'){   // start polling
+    poll_time = millis();
+  }else if(c=='0'){   // stop polling
+    poll_time = 0;
+  }else if(c=='q'){   // clear display
+    disp_mode = 255;
+
+  }else if(c=='l'){ // lock vfo's
+    rig_mode = RIG_MAN;
+    rig_state = 0;
+  }else if(c=='u'){ // unlock vfo's
+    rig_mode = RIG_FREE;
+    rig_state = 0;
+  }else if(c=='d'){ // doppler soft controlled, for linears
+    rig_mode = RIG_LIN;
+    rig_state = 0;
+  }else if(c=='D'){ // doppler forced, for fm
+    rig_mode = RIG_FORCE;
+    rig_state = 0;
+
+  }else if(c=='n'){ // next satellite from conf
+    sat_ptr++;
+    if(sat_ptr >= sat_num) sat_ptr = 0;
+    loadSat();
+  }else if(c=='N'){ // previour satellite
+    if(sat_ptr == 0) sat_ptr = sat_num;
+    else sat_ptr--;
+    loadSat();
+
+  }else if(c=='s'){
+    term.printf(F("Sat %s: Az %.0lf, El %.0lf, Speed %.2lf km/s\n"), sat.satName, sat.satAz, sat.satEl, sat_speed);
+    term.printf(F("AOS in: %lf, LOS in: %lf minutes.\n"), (aos - rtc_jdt) * 1440, (los - rtc_jdt) * 1440);
+
+  }else if(c=='g'){ // show gps
+    term.printf(F("Time: %02d:%02d:%02d, "), GPS.hour, GPS.minute, GPS.seconds);
+    term.printf(F("Latitude: %.3f, Longitude: %.3f\n"), GPS.latitudeDegrees, GPS.longitudeDegrees);
+
+  }else if(c=='T'){ // temporarily enter timesync mode, 100ms blocking!
+    processSyncMessage();
+  }
+}
+
+void r1Event(){
+  // parse responses from radio 1
+  if(r1_req > 0 && r1_req < 10 && r1.available() == r1_req){           // does the response match the request ?
+    for(int i=0;i<r1_req;i++) r1_read[i] = r1.read();
+    if(r1_req == 5){                                    // frequency response
+      r1_freq = from_bcd_be(r1_read);                   // convert bcd array to long
+    }
+    r1_req=0;                                           // clear request length
+  }else if((r1_req == 0 || r1_req > 9) && r1.available()){              // flush unrequested data
+    r1.read();
+  }
+  if(r1_req > 0 && millis() > r1_time + timeout){       // request timeout
+    r1_freq = 1;
+    r1_req = 255;
+  }
+}
+
+void r2Event(){
+  // parse responses from radio 2
+  if(r2_req > 0 && r2_req < 10 && r2.available() == r2_req){           // does the response match the request ?
+    for(int i=0;i<r2_req;i++) r2_read[i] = r2.read();
+    if(r2_req == 5){                                    // frequency response
+      r2_freq = from_bcd_be(r2_read);                   // convert bcd array to long
+    }
+    r2_req=0;                                           // clear request length
+  }else if((r2_req == 0 || r2_req > 9) && r2.available()){              // flush unrequested
+    r2.read();
+  }
+  if(r2_req > 0 && millis() > r2_time + timeout){       // request timeout
+    r2_freq = 1;
+    r2_req = 255;
+  }
+}
+
+void gpsEvent(){
+  GPS.read();
+  if (GPS.newNMEAreceived()) {  // parse nmea
+    GPS.parse(GPS.lastNMEA());
   }
 }
