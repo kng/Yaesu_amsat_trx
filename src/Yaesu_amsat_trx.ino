@@ -25,6 +25,7 @@
 #define RST_PIN  3
 #define DC_PIN   4
 #define SDCS_PIN 5
+#define SPI_FREQ 8000000
 
 // encoder + button
 #define ENC_SEL  6
@@ -55,7 +56,8 @@
 #include <Encoder.h>
 #include <Bounce2.h>
 
-Adafruit_SSD1351 tft = Adafruit_SSD1351(SCREEN_WIDTH, SCREEN_HEIGHT, &SPI, CS_PIN, DC_PIN, RST_PIN);
+Adafruit_SSD1351 tft_hw = Adafruit_SSD1351(SCREEN_WIDTH, SCREEN_HEIGHT, &SPI, CS_PIN, DC_PIN, RST_PIN);
+GFXcanvas16 tft = GFXcanvas16(SCREEN_WIDTH, SCREEN_HEIGHT);
 SdFs sd;
 FsFile file;
 // Make sure to map the serialEvent functions below to match these!
@@ -83,7 +85,7 @@ unsigned int poll_intervals[2] = {1000,100};    // [0] slow, [1] fast polling in
 unsigned int timeout = 100;  // in ms
 float vfo_factor;   // factor between the vfo's at locking
 double gps_jdt, rtc_jdt, aos, los, dist_old, sat_speed; // julian date, old sat distance
-byte disp_mode, disp_oldmode = 255, sat_predicted = 255;
+byte disp_mode, sat_predicted = 255;
 int oldsecond;
 long downlink, uplink, downlink_doppler, uplink_doppler; // deciherz, same as frequency resolution
 unsigned long norad;  // norad ID
@@ -172,14 +174,11 @@ char *maidenhead(double lat, double lon){
   return mh;
 }
 
-void updateDisplay(){
-  if(millis() - disp_time < 200) return;  // rate limiting
+bool updateDisplay(){
+  if(millis() - disp_time < 100) return true;  // rate limiting
   disp_time = millis();
-  if(disp_oldmode != disp_mode){
-    disp_oldmode = disp_mode;
-    tft.fillScreen(BLACK);
-    tft.setTextColor(WHITE, BLACK);
-  }
+  tft.fillScreen(BLACK);
+  tft.setTextColor(WHITE, BLACK);
   if(disp_mode==0){   // Display radio info
     tft.setCursor(0,0);
     tft.setTextSize(1);
@@ -223,8 +222,8 @@ void updateDisplay(){
       tft.print(F("AOS in:  > 1 day\nLOS in:  > 1 day\n"));
     }
     tft.printf(F("GPS lock:  %d (s:%2d)\n"), GPS.fixquality, GPS.satellites);
-    //tft.printf(F("Latitude:  %8.4lf\n"), GPS.latitudeDegrees);
-    //tft.printf(F("Longitude: %08.4lf\n"), GPS.longitudeDegrees);
+    tft.printf(F("Latitude:  %8.4lf\n"), GPS.latitudeDegrees);
+    tft.printf(F("Longitude: %08.4lf\n"), GPS.longitudeDegrees);
     tft.printf(F("Locator:   %.6s\n"), maidenhead(GPS.latitudeDegrees, GPS.longitudeDegrees));
 
   }else{
@@ -233,7 +232,9 @@ void updateDisplay(){
   tft.setTextSize(0);
   tft.setCursor(SCREEN_WIDTH - 32, SCREEN_HEIGHT - 8);
   tft.printf(F("%1d %3d"), btn_mode % 10, (byte) enc_pos % 256);
-  //term.printf(F("updatedisplay() took %lu ms\n"), millis() - disp_time);
+  tft_hw.drawRGBBitmap(0,0,tft.getBuffer(),SCREEN_WIDTH, SCREEN_HEIGHT);
+  term.printf(F("updatedisplay() took %lu ms\n"), millis() - disp_time);
+  return false;
 }
 
 time_t getTeensy3Time()
@@ -386,11 +387,11 @@ void setup() {
 
   GPS.begin(9600);        // make sure your module settings matches this, common 4800 or 9600
 
-  tft.begin();
+  tft_hw.begin(SPI_FREQ);
   //tft.setRotation(2);     // rotate display 180 deg if necessary
   updateDisplay();        // draw display
   
-  if (!sd.begin(SdSpiConfig(SDCS_PIN, SHARED_SPI, 20))) {
+  if (!sd.begin(SdSpiConfig(SDCS_PIN, 1, SPI_FREQ))) {
     sd.initErrorHalt(&term);
   }
   //sd.ls(LS_DATE | LS_SIZE); // show files on card
@@ -400,7 +401,7 @@ void setup() {
 }
 
 void loop() {   // non blocking loop, no delays or blocking calls
-  bool needUpdateDisplay = false;
+  static bool needUpdateDisplay = false;
   btn.update();
   if(btn.fell()){
     btn_mode++;
@@ -410,11 +411,11 @@ void loop() {   // non blocking loop, no delays or blocking calls
   enc_pos = myEnc.read() >> 2;  // divide down to mechanical steps if needed
   if(enc_pos != enc_old){
     enc_old = enc_pos;
+    needUpdateDisplay=true;
   }
 
   if(btn_mode == 0){
     disp_mode = abs(enc_pos) % 3;
-    if(disp_mode != disp_oldmode) needUpdateDisplay=true;
   }
 
   if(second() != oldsecond){    // use system RTC
@@ -641,7 +642,7 @@ void loop() {   // non blocking loop, no delays or blocking calls
   }else{
     rig_mode=RIG_FREE;
   }
-  if(needUpdateDisplay) updateDisplay();
+  if(needUpdateDisplay) needUpdateDisplay=updateDisplay();
 }
 
 void termEvent() {
