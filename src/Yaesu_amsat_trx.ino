@@ -5,15 +5,13 @@
  * Display: SSD1351 oled 128x128 or 128x96
  * Control: two Yaesu FT-8x7 tranceivers in full duplex
  * GPS: generic nmea-0183
+ * Rotary encoder with button for UI
+ * uSD reader, some displays contain one, the teensy 4.1 also has one, or use external.
  * 
  * Supported modes:
- * - Doppler control: increase in frequency on the master results in decrease on slave, multiplied regarding to frequency
- * - Linear control: soon (tm)
- * 
- * To be implemented:
- * - Satellite configuration from SDcard, satellites.txt (norad, qrg, mode)
- * - GPS for position and time, used in the doppler calculations
- * - TLE from nasabare.txt with up to date tle's
+ * - Doppler control manual: takes current vfo's and lock them together, good for FM and sats not in config
+ * - Doppler control automatic: same as above but initializes with the frequencies set in the config
+ * - Linear control: initializes radios from config and allowin linear adjustments with both vfo, one is master so control both.
  */
 
 #define SCREEN_WIDTH  128
@@ -78,7 +76,7 @@ char read_txs[5] = {0,0,0,0,0xF7};    // read transmitter status
 char r1_read[10], r2_read[10];  // RX buffer from radio
 byte r1_req, r2_req;            // RX bytes requested
 long r1_freq, r1_oldfreq, r1_offset, r1_lockfreq, r2_freq, r2_oldfreq, r2_offset, r2_lockfreq;
-bool r1_ptt, r2_ptt;
+bool r1_ptt, r2_ptt, needUpdateDisplay;
 byte rig_state;  // rig state machine
 unsigned long r1_time, r2_time, poll_time, sat_time, disp_time;   // millis on last command, last poll
 unsigned int poll_intervals[2] = {1000,100};    // [0] slow, [1] fast polling interval
@@ -94,7 +92,8 @@ byte btn_mode;
 
 typedef enum { MODE_UNK, MODE_FM, MODE_USB, MODE_LSB } radio_modes;
 typedef enum { RIG_FREE, RIG_LIN, RIG_FORCE, RIG_MAN } rig_modes;
-rig_modes rig_mode;
+rig_modes rig_mode, req_mode;
+char rig_mode_text[] = {'-', 'L', 'F', 'M'};
 
 typedef struct { // display name, norad, uplink_qrg, uplink_mode, downlink_qrg, downlink_mode
   char name[25];
@@ -193,6 +192,13 @@ bool updateDisplay(){
     tft.setTextSize(2);
     if(r2_freq == 1) tft.print(F("Timeout.  "));
     else tft.printf("%03li.%03li.%02li", r2_freq/100000, r2_freq/100 % 1000, r2_freq % 100);
+    tft.setCursor(0, SCREEN_HEIGHT - 8);  // bottom left
+    tft.setTextSize(1);
+    if(btn_mode==0){
+      tft.printf(F("Mode: %c"), rig_mode_text[rig_mode]);
+    }else{
+      tft.printf(F("Set: %c"), rig_mode_text[req_mode]);
+    }
 
   }else if(disp_mode==1){   // Display satellite and doppler info
     tft.setCursor(0,0);
@@ -226,14 +232,18 @@ bool updateDisplay(){
     tft.printf(F("Longitude: %08.4lf\n"), GPS.longitudeDegrees);
     tft.printf(F("Locator:   %.6s\n"), maidenhead(GPS.latitudeDegrees, GPS.longitudeDegrees));
 
-  }else{
+  }else if(disp_mode > 128){
     disp_mode=0;
+    return true;
+  }else{
+    disp_mode=2;
+    return true;
   }
   tft.setTextSize(0);
   tft.setCursor(SCREEN_WIDTH - 32, SCREEN_HEIGHT - 8);
   tft.printf(F("%1d %3d"), btn_mode % 10, (byte) enc_pos % 256);
   tft_hw.drawRGBBitmap(0,0,tft.getBuffer(),SCREEN_WIDTH, SCREEN_HEIGHT);
-  term.printf(F("updatedisplay() took %lu ms\n"), millis() - disp_time);
+  //term.printf(F("updatedisplay() took %lu ms\n"), millis() - disp_time);
   return false;
 }
 
@@ -401,21 +411,45 @@ void setup() {
 }
 
 void loop() {   // non blocking loop, no delays or blocking calls
-  static bool needUpdateDisplay = false;
+
   btn.update();
   if(btn.fell()){
     btn_mode++;
     btn_mode%=2;
     needUpdateDisplay=true;
   }
+
   enc_pos = myEnc.read() >> 2;  // divide down to mechanical steps if needed
   if(enc_pos != enc_old){
+    if(btn_mode == 0){
+      disp_mode += enc_pos - enc_old;
+    }else{
+      if(disp_mode == 0){ // radio display, control mode
+        // need to iterate through the enum in some better way ?
+        if(req_mode == RIG_FREE)       req_mode = RIG_LIN;
+        else if(req_mode == RIG_LIN)   req_mode = RIG_FORCE;
+        else if(req_mode == RIG_FORCE) req_mode = RIG_MAN;
+        else if(req_mode == RIG_MAN)   req_mode = RIG_FREE;
+        else req_mode = RIG_FREE;
+      }else if(disp_mode == 1){   // sat display, control which sat
+        if(enc_pos>enc_old){  // next sat
+          sat_ptr++;
+          if(sat_ptr >= sat_num) sat_ptr = 0;
+          loadSat();
+          findPass();
+          sat.findsat(rtc_jdt);
+        }else{                // prev sat
+          if(sat_ptr == 0) sat_ptr = sat_num - 1;
+          else sat_ptr--;
+          loadSat();
+          findPass();
+          sat.findsat(rtc_jdt);
+        }
+        req_mode = RIG_FREE; // reset mode when selecting a new sat
+      }
+    }
     enc_old = enc_pos;
     needUpdateDisplay=true;
-  }
-
-  if(btn_mode == 0){
-    disp_mode = abs(enc_pos) % 3;
   }
 
   if(second() != oldsecond){    // use system RTC
@@ -425,9 +459,7 @@ void loop() {   // non blocking loop, no delays or blocking calls
       jday((int)2000 + GPS.year, GPS.month, GPS.day, GPS.hour, GPS.minute, GPS.seconds, 0, false, gps_jdt);
       if(rtc_jdt > gps_jdt + 0.00005 || rtc_jdt < gps_jdt - 0.00005){  // ~4s tolerance for setting rtc
         term.print(F("Setting system time from gps.\n"));
-        //term.printf(F(" Old: %02d:%02d:%02d"), hour(), minute(), second());
         setTime(GPS.hour, GPS.minute, GPS.seconds, GPS.day, GPS.month, GPS.year);
-        //term.printf(F(", New: %02d:%02d:%02d\n"), hour(), minute(), second());
         jday(year(), month(), day(), hour(), minute(), second(), 0, false, rtc_jdt);
         sat_predicted = 0;
       }
@@ -470,6 +502,9 @@ void loop() {   // non blocking loop, no delays or blocking calls
         needUpdateDisplay=true;
         poll_time = millis();
         rig_state = 0;
+        if(btn_mode == 0 && req_mode != rig_mode){
+          rig_mode = req_mode;
+        }
         break;
     }
 
@@ -493,8 +528,6 @@ void loop() {   // non blocking loop, no delays or blocking calls
           rig_state++;
         }else if(r1_req > 9 || r2_req > 9){           // timeout
           rig_state = 255;
-          rig_mode = RIG_FREE;    // bail out
-          term.println(F("Timeout from radio, exiting RIG_MAN."));
         }
         break;
 
@@ -534,7 +567,16 @@ void loop() {   // non blocking loop, no delays or blocking calls
       default:
         needUpdateDisplay=true;
         poll_time = millis();
-        rig_state = 2;
+        if(rig_state == 255){
+          term.println(F("Timeout from radio, exiting RIG_MAN."));
+          req_mode = rig_mode = RIG_FREE;
+        }else{
+          rig_state = 2;
+        }
+        if(btn_mode == 0 && req_mode != rig_mode){
+          rig_mode = req_mode;
+          rig_state = 0;
+        }
         break;
     }
 
@@ -555,7 +597,17 @@ void loop() {   // non blocking loop, no delays or blocking calls
       default:
         needUpdateDisplay=true;
         poll_time = millis();
-        rig_state = 0;
+        if(rig_state == 255){
+          term.println(F("Timeout from radio, exiting RIG_FORCE."));
+          req_mode = rig_mode = RIG_FREE;
+        }else{
+          rig_state = 0;
+        }
+        if(btn_mode == 0 && req_mode != rig_mode){
+          rig_mode = req_mode;
+          rig_state = 0;
+        }
+
         break;
     }
 
@@ -636,11 +688,20 @@ void loop() {   // non blocking loop, no delays or blocking calls
       default:
         needUpdateDisplay=true;
         poll_time = millis();
-        rig_state = 1;    // be sure to skip the init at step 0 when looping
+        if(rig_state == 255){
+          term.println(F("Timeout from radio, exiting RIG_LIN."));
+          req_mode = rig_mode = RIG_FREE;
+        }else{
+          rig_state = 1;
+        }
+        if(btn_mode == 0 && req_mode != rig_mode){
+          rig_mode = req_mode;
+          rig_state = 0;
+        }
         break;
     }
   }else{
-    rig_mode=RIG_FREE;
+    req_mode = rig_mode = RIG_FREE;
   }
   if(needUpdateDisplay) needUpdateDisplay=updateDisplay();
 }
@@ -725,7 +786,9 @@ void r2Event(){
 }
 
 void gpsEvent(){
-  GPS.read();
+  while(GPS.available()){
+    GPS.read(); // only does single reads
+  }
   if (GPS.newNMEAreceived()) {  // parse nmea
     GPS.parse(GPS.lastNMEA());
   }
